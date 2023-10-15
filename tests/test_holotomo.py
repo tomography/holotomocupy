@@ -74,13 +74,15 @@ if __name__ == "__main__":
         dxchange.write_tiff_stack(np.angle(psi.get()).astype('float32'),'initangle/r',overwrite=True)
         dxchange.write_tiff_stack(np.abs(prb[0].get()).astype('float32'),'initprbabs/r',overwrite=True)
         dxchange.write_tiff_stack(np.angle(prb[0].get()).astype('float32'),'initprbangle/r',overwrite=True)
-        prb=prb*0+1
+        # prb=prb*0+1
         fpsi = pslv.fwd_holotomo(psi,prb)
         data = cp.abs(fpsi)**2
         dxchange.write_tiff_stack(data[0].get().astype('float32'),'datam2/d',overwrite=True)
-       # fprb = pslv.fwd_holotomo(psi*0+1,prb)
-       # data_prb = cp.abs(fprb)**2
-        #data/=data_prb
+        # fprb = pslv.fwd_holotomo(psi*0+1,prb)
+        # data_prb = cp.abs(fprb)**2
+        # data/=data_prb
+        # dxchange.write_tiff_stack(data[0].get().astype('float32'),'datam3/d',overwrite=True)
+        # exit()
        # for k in range(4):
        #     r = int(magnifications[k]*n)
        #     pad_width = n//2-r//2
@@ -98,9 +100,9 @@ if __name__ == "__main__":
         dxchange.write_tiff_stack(np.abs(psi0.get()).astype('float32'),'init0abs/r',overwrite=True)
         dxchange.write_tiff_stack(np.angle(psi0.get()).astype('float32'),'init0angle/r',overwrite=True)
         
-        exit()
+        # exit()
         psi0 = psi*0+1
-        #prb=prb*0+1
+        # prb=prb*0+1
         psi=pslv.cg_holotomo(data, psi0, prb,  64, 'gaussian')
         #prb0 = np.roll(prb0,(0,5,0))
         #psi,prb=pslv.grad_holotomo(data, psi0, prb0,  128, False)

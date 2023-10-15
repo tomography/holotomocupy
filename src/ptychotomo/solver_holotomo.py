@@ -15,7 +15,7 @@ SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
 class SolverHolotomo():
 
     def __init__(self, ntheta, nz, n, voxelsize, energy, distances, magnification):
-        self.cl_usfft=holotomo(2*n,2*nz,1)
+        self.cl_holotomo=holotomo(2*n,2*nz,1)
         self.n = n
         self.nz = nz
         self.voxelsize = voxelsize
@@ -66,61 +66,104 @@ class SolverHolotomo():
             #print('no direction')
             gamma = 0
         return gamma
+    
+    def fwd_pad(self,f):
+        
+        pad_width = self.n//2
+        fpad = cp.zeros([self.n+2*pad_width,self.n+2*pad_width],dtype='complex64')
+        # print(cp.linalg.norm(f))
+        # f = cp.ascontiguousarray(f)
+        self.cl_holotomo.fwd_padsym(fpad.data.ptr,f.data.ptr,pad_width,0)
+        # for k in range(self.n+2*pad_width):
+        #     for j in range(self.n+2*pad_width):
+        #         if (k < pad_width):
+        #             kk = pad_width-k-1
+        #         elif (k >= self.n + pad_width):
+        #             kk = 2*self.n-k+pad_width-1            
+        #         else:                
+        #             kk = k-pad_width
+                    
+        #         if (j < pad_width):
+        #             jj = pad_width-j-1            
+        #         elif (j >= self.n + pad_width):
+        #             jj = 2*self.n-j+pad_width-1
+        #         else:
+        #             jj= j-pad_width       
+        #         fpad[k,j]=f[kk,jj]
+            
+        return fpad
+    
+    def adj_pad(self,fpad):
+        pad_width = self.n//2
+        f = cp.zeros([self.n, self.n],dtype='complex64')
+        self.cl_holotomo.adj_padsym(f.data.ptr,fpad.data.ptr,pad_width,0)
+        # for k in range(self.n+2*pad_width):
+        #     for j in range(self.n+2*pad_width):
+        #         if (k < pad_width):
+        #             kk = pad_width-k-1
+        #         elif (k >= self.n + pad_width):
+        #             kk = 2*self.n-k+pad_width-1            
+        #         else:                
+        #             kk = k-pad_width
+                    
+        #         if (j < pad_width):
+        #             jj = pad_width-j-1            
+        #         elif (j >= self.n + pad_width):
+        #             jj = 2*self.n-j+pad_width-1
+        #         else:
+        #             jj= j-pad_width       
+        #         f[kk,jj]+=fpad[k,j]
+        return f
+    
+    def fwd_resample(self,f,magnification):
+        xk = -((cp.arange(-self.n/2,self.n/2)/self.n)/magnification).astype('float32')
+        [xk,yk] = cp.meshgrid(xk,xk)
+        fr = cp.zeros([self.n,self.n],dtype='complex64') 
+        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
+        self.cl_holotomo.fwd_usfft(fr.data.ptr,f.data.ptr,xk.data.ptr,yk.data.ptr,0)
+        fr = fr/self.n/self.n/4
+        return fr
 
+    def adj_resample(self,fr,magnification):
+        xk = -((cp.arange(-self.n/2,self.n/2)/self.n)/magnification).astype('float32')
+        [xk,yk] = cp.meshgrid(xk,xk)
+        f = cp.zeros([2*self.n,2*self.n],dtype='complex64') 
+        self.cl_holotomo.adj_usfft(f.data.ptr, fr.data.ptr,xk.data.ptr,yk.data.ptr,0)                 
+        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f)))
+        return f
+    
+    def fwd_propagate(self,f,fP):
+        ff = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
+        ff = ff*fP 
+        ff = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(ff)))
+        return ff
+    
+    def adj_propagate(self,ff,fP):
+        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(ff)))
+        f = f*cp.conj(fP) 
+        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f)))
+        return f
+        
     def fwd_holotomo(self, psi, prb):
         """Holotomography transform (FQ)"""
         data = cp.zeros([self.ntheta,len(self.distances),self.nz, self.n], dtype='complex64')
-        for itheta in range(self. ntheta):
-            for i,d in enumerate(self.distances):
-                # 1
-                tpsi = np.pad(psi[itheta],((self.n//2,self.n//2),(self.n//2,self.n//2)))
- #               tpsi = cp.zeros((2*self.n,2*self.n),dtype='complex64')
-  #              self.cl_usfft.wrap(tpsi.data.ptr, psi[itheta].data.ptr)
-                ftpsi = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(tpsi)))
-                xk = ((cp.arange(-self.n/2,self.n/2)/self.n)/self.magnification[i]/2).astype('float32')
-                [xk,yk] = cp.meshgrid(xk,xk)
-                xk = cp.ascontiguousarray(-xk)
-                yk = cp.ascontiguousarray(-yk)                
-                spsi = psi[itheta]*0 
-                self.cl_usfft.fwd_usfft(spsi.data.ptr,ftpsi.data.ptr,xk.data.ptr,yk.data.ptr,0)
-                spsi=spsi/self.n/self.n
-
-                # 2
-                spsi*=prb[itheta,i]
-                # 3
-                fpsi = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(spsi)))
-                fpsi = fpsi*self.fP[i] ###################NOTE
-                data[itheta,i] = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(fpsi)))
-                print(cp.linalg.norm(data[itheta,i]))
-                
+        for itheta in range(self.ntheta):
+            for i in range(len(self.distances)):
+                psi_pad = self.fwd_pad(psi[itheta])
+                psir = self.fwd_resample(psi_pad,self.magnification[i]*2)
+                psir *= prb[itheta,i]
+                data[itheta,i] = self.fwd_propagate(psir,self.fP[i])                
         return data
 
     def adj_holotomo(self, data, prb):
         """Holotomography transform (FQ)"""
         psi = cp.zeros([self.ntheta,self.nz, self.n], dtype='complex64')
         for itheta in range(self. ntheta):
-            for i,d in enumerate(self.distances):
-                # 3
-                fdata = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(data[itheta,i])))
-                fdata*=np.conj(self.fP[i])
-                spsi = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(fdata)))
-
-                # 2
-                spsi*=cp.conj(prb[itheta,i])
-                
-
-                #resampling back
-                xk = ((cp.arange(-self.n//2,self.n//2)/self.n)/self.magnification[i]/2).astype('float32')
-                [xk,yk] = cp.meshgrid(xk,xk)
-                xk = cp.ascontiguousarray(-xk)
-                yk = cp.ascontiguousarray(-yk)
-                tpsi = cp.zeros([2*self.n,2*self.n],dtype='complex64') 
-                self.cl_usfft.adj_usfft(tpsi.data.ptr, spsi.data.ptr,xk.data.ptr,yk.data.ptr,0)                 
-                tpsi = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(tpsi)))
-                tpsi = tpsi[self.n//2:-self.n//2,self.n//2:-self.n//2]                
-  #              psi0 = psi[itheta]*0
-   #             self.cl_usfft.wrapadj(tpsi0.data.ptr,tpsi.data.ptr)
-                psi[itheta] += tpsi*4#np.conj(prb[itheta,i])*np.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(fdata*cp.conj(self.fP[i]))))
+            for i in range(len(self.distances)):
+                psir = self.adj_propagate(data[itheta,i],self.fP[i])       
+                psir *= cp.conj(prb[itheta,i])
+                psi_pad = self.adj_resample(psir,self.magnification[i]*2)
+                psi[itheta] += self.adj_pad(psi_pad)
         return psi
 
     def adjprb_holotomo(self, data, psi):
