@@ -17,28 +17,20 @@ include_directories(${PYTHON_INCLUDE_PATH})
 find_package(OpenMP)
 
 # Must tell CMake that SWIG interface files are CXX files
-set_source_files_properties(radonusfft.i PROPERTIES CPLUSPLUS ON)
-set_source_files_properties(ptychofft.i PROPERTIES CPLUSPLUS ON)
-set_source_files_properties(deform.i PROPERTIES CPLUSPLUS ON)
-set_source_files_properties(holotomo.i PROPERTIES CPLUSPLUS ON)
+set_source_files_properties(tomo.i PROPERTIES CPLUSPLUS ON)
+set_source_files_properties(holo.i PROPERTIES CPLUSPLUS ON)
 
 
-swig_add_library(radonusfft LANGUAGE python SOURCES radonusfft.i radonusfft.cu)
-swig_add_library(ptychofft LANGUAGE python SOURCES ptychofft.i ptychofft.cu)
-swig_add_library(deform LANGUAGE python SOURCES deform.i deform.cu)
-swig_add_library(holotomo LANGUAGE python SOURCES holotomo.i holotomo.cu)
+swig_add_library(tomo LANGUAGE python SOURCES tomo.i tomo.cu)
+swig_add_library(holo LANGUAGE python SOURCES holo.i holo.cu)
 
 
-swig_link_libraries(radonusfft cudart cufft OpenMP::OpenMP_CXX)
-swig_link_libraries(ptychofft cudart cufft)
-swig_link_libraries(deform cudart cufft nppig nppial nppc npps nppidei OpenMP::OpenMP_CXX)
-swig_link_libraries(holotomo cudart cufft)
+swig_link_libraries(tomo cudart cufft OpenMP::OpenMP_CXX)
+swig_link_libraries(holo cudart cufft)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options -fopenmp")
 
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/radonusfft.py" DESTINATION ptychotomo)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ptychofft.py" DESTINATION ptychotomo)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/deform.py" DESTINATION ptychotomo)
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/holotomo.py" DESTINATION ptychotomo)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/tomo.py" DESTINATION holotomo)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/holo.py" DESTINATION holotomo)
 
 
-install(TARGETS radonusfft ptychofft deform holotomo LIBRARY DESTINATION ptychotomo)
+install(TARGETS tomo holo LIBRARY DESTINATION holotomo)
