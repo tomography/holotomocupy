@@ -5,17 +5,22 @@ import holotomo
 if __name__ == "__main__":
     
    # read object
-    n = 256  # object size n x,y
-    nz = 256  # object size in z    
+    n = 384  # object size n x,y
+    nz = 384  # object size in z    
     ntheta = 128  # number of angles (rotations)
     
-    pnz = 256 # tomography chunk size for GPU processing
+    pnz = 384 # tomography chunk size for GPU processing
     
     center = n/2 # rotation axis
     theta = np.linspace(0, np.pi, ntheta).astype('float32') # projection angles
     # Load a 3D object 
-    beta = dxchange.read_tiff('data/beta-chip-256.tiff')[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
-    delta = dxchange.read_tiff('data/delta-chip-256.tiff')[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
+    beta0 = dxchange.read_tiff('data/beta-chip-256.tiff')#[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
+    delta0 = dxchange.read_tiff('data/delta-chip-256.tiff')#[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
+    delta = np.zeros([nz,n,n],dtype='complex64') 
+    beta = np.zeros([nz,n,n],dtype='complex64')
+    delta[nz//2-128:nz//2+128,n//2-128:n//2+128,n//2-128:n//2+128]= delta0
+    beta[nz//2-128:nz//2+128,n//2-128:n//2+128,n//2-128:n//2+128]= beta0
+
     u = delta+1j*beta
     
     # simulate data
