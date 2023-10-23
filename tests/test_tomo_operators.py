@@ -7,7 +7,7 @@ if __name__ == "__main__":
    # read object
     n = 384  # object size n x,y
     nz = 384  # object size in z    
-    ntheta = 128  # number of angles (rotations)
+    ntheta = 180  # number of angles (rotations)
     
     pnz = 384 # tomography chunk size for GPU processing
     
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         data = tslv.paddata(data, ne)
         # cg solver
         init = np.zeros([nz,ne,ne],dtype='complex64')
-        piter = 32
+        piter = 4
         u = tslv.cg_tomo_batch(data,init,piter)
         u = tslv.unpadobject(u, n)
     # save generated data

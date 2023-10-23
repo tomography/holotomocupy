@@ -5,11 +5,11 @@ import holotomo
 if __name__ == "__main__":
     # read object
     n = 256  # object size n x,y
-    nz = 256  # object size in z    
-    ntheta = 8  # number of angles (rotations)
+    nz = 256 # object size in z    
+    ntheta = 1  # number of angles (rotations)
 
     pnz = 256 # tomography chunk size for GPU processing
-    ptheta = 8 # holography chunk size for GPU processing
+    ptheta = 1 # holography chunk size for GPU processing
     
     center = n/2 # rotation axis
     theta = np.linspace(0, np.pi, ntheta).astype('float32') # projection angles
@@ -55,7 +55,7 @@ if __name__ == "__main__":
     prb = np.zeros([len(distances),nz,n],dtype='complex64')    
     prb_abs = dxchange.read_tiff_stack('data/prb_id16a/prb_abs_00000.tiff',ind=range(len(distances)))[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
     prb_phase = dxchange.read_tiff_stack('data/prb_id16a/prb_phase_00000.tiff',ind=range(len(distances)))[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
-    prb[:] = 1#prb_abs*np.exp(1j*prb_phase)   
+    prb[:] = prb_abs*np.exp(1j*prb_phase)   
     # compute tomographic projections
     with holotomo.SolverTomo(theta, ntheta, nz, n, pnz, center) as tslv:
         proj = tslv.fwd_tomo_batch(u) 
@@ -72,9 +72,9 @@ if __name__ == "__main__":
         
         # save generated data
         for k in range(ntheta):
-            for j in range(4):
+            for j in range(len(distances)):
                 dxchange.write_tiff(data[j,k],f'data/test_holo_operators/data/a{k}_d{j}',overwrite=True)        
-        for j in range(4):        
+        for j in range(len(distances)):        
             dxchange.write_tiff(np.abs(prb[j]),f'data/test_holo_operators/prb/abs_d{j}',overwrite=True)
             dxchange.write_tiff(np.angle(prb[j]),f'data/test_holo_operators/prb/phase_d{j}',overwrite=True)
         for k in range(ntheta):        
@@ -88,10 +88,10 @@ if __name__ == "__main__":
     print(f'Adjoint test: {np.sum(psi*np.conj(psi0))} ? {np.sum(fpsi*np.conj(fpsi))}')        
     # exit()
     print('Test reconstruction by CG')
-    piter = 128
+    piter = 64
     init = psi*0+1
     with holotomo.SolverHolo(ntheta, nz, n, ptheta, voxelsize, energy, distances, norm_magnifications)  as pslv:
         rec = pslv.cg_holo_batch(data,init,prb,piter)
         for k in range(ntheta):        
-            dxchange.write_tiff(np.abs(psi[k]),f'data/test_holo_operators/rec/abs_a{k}',overwrite=True)
-            dxchange.write_tiff(np.angle(psi[k]),f'data/test_holo_operators/rec/phase_a{k}',overwrite=True)
+            dxchange.write_tiff(np.abs(rec[k]),f'data/test_holo_operators/rec/abs_a{k}',overwrite=True)
+            dxchange.write_tiff(np.angle(rec[k]),f'data/test_holo_operators/rec/phase_a{k}',overwrite=True)

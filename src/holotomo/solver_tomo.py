@@ -122,8 +122,10 @@ class SolverTomo(tomo):
         
         gamma = 1# init gamma as a large value
         for i in range(piter):
-            fu = self.fwd_tomo(u)
-            grad = self.adj_tomo(fu-data)/(self.ntheta*self.n)
+            u = cp.ascontiguousarray(u)
+            fu = self.fwd_tomo(u)            
+            
+            grad = self.adj_tomo(fu-data)/self.ntheta/self.n
             
             # Dai-Yuan direction
             if i == 0:
@@ -131,6 +133,7 @@ class SolverTomo(tomo):
             else:
                 d = -grad+cp.linalg.norm(grad)**2 / \
                     (1e-15+(cp.sum(cp.conj(d)*(grad-grad0))))*d
+            print(cp.linalg.norm(d))
             grad0 = grad
             # line search
             fd = self.fwd_tomo(d)

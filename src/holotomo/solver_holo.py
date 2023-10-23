@@ -4,7 +4,7 @@ import cupy as cp
 import numpy as np
 from .holo import holo
 from .utils import chunk
-PLANCK_CONSTANT = 6.58211928e-19  # [keV*s]
+PLANCK_CONSTANT = 4.135667696e-18  # [keV*s]
 SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
 
 
@@ -26,8 +26,7 @@ class SolverHolo():
             fx = cp.fft.fftshift(cp.fft.fftfreq(n,d=voxelsize))
             [fx,fy] = cp.meshgrid(fx,fx)
             for i,d in enumerate(distances):
-                lamd = 2*cp.pi/self.wavenumber()
-                self.fP[i] = cp.exp(-1j*cp.pi*lamd*d*(fx**2+fy**2))
+                self.fP[i] = cp.exp(-1j*cp.pi*self.wavelength()*d*(fx**2+fy**2))
         
         #CUDA C class for faster USFFT and padding
         self.cl_holo = holo(2*n,2*nz, ptheta)
@@ -41,13 +40,17 @@ class SolverHolo():
         #self.free()
         pass
 
-    def wavenumber(self):
-        """Wave number index"""
-        return 2 * np.pi / (2 * np.pi * PLANCK_CONSTANT * SPEED_OF_LIGHT / self.energy)
+    #def wavenumber(self):
+        #"""Wave number index"""
+        #return 2 * np.pi / (2 * np.pi * PLANCK_CONSTANT * SPEED_OF_LIGHT / self.energy)
+
+    def wavelength(self):
+        """Wavelength"""
+        return PLANCK_CONSTANT * SPEED_OF_LIGHT / self.energy
 
     def exptomo(self, psi):
-        """Exp representation of projections, exp(i\nu\psi)"""
-        return np.exp(1j*psi * self.voxelsize * self.wavenumber())
+        """Exp representation of projections, exp(i\psi\pi/\lambda)"""
+        return np.exp(1j*psi * self.voxelsize * 2*cp.pi / self.wavelength())
     
     def mlog(self,psi):
         res = psi.copy()
@@ -57,7 +60,7 @@ class SolverHolo():
     
     def logtomo(self, psi):
         """Log representation of projections, -i/\nu log(psi)"""
-        return -1j / self.wavenumber() * self.mlog(psi) / self.voxelsize
+        return -1j * self.wavelength()/ (2*cp.pi) * self.mlog(psi) / self.voxelsize
     
     def line_search(self, minf, gamma, u, fu, d, fd):
         """ Line search for the step sizes gamma"""
@@ -158,6 +161,7 @@ class SolverHolo():
         # minimization functional
         def minf(psi,fpsi):
             f = cp.linalg.norm(cp.abs(fpsi)-cp.sqrt(data))**2            
+            # f = cp.linalg.norm(cp.abs(fpsi)**2-data)**2            
             return f        
         psi = init.copy()
         
@@ -166,9 +170,12 @@ class SolverHolo():
         for i in range(piter):
             fpsi = self.fwd_holo(psi,prb)
             grad = self.adj_holo(
-                fpsi-cp.sqrt(data)*cp.exp(1j*cp.angle(fpsi)), prb)/maxprb**2
+               fpsi-cp.sqrt(data)*cp.exp(1j*cp.angle(fpsi)), prb)/maxprb**2
+            #grad = self.adj_holo(
+                 #(cp.abs(fpsi)**2-data)*fpsi,prb)/maxprb**2
             
             # Dai-Yuan direction
+            #d=-grad
             if i == 0:
                 d = -grad
             else:

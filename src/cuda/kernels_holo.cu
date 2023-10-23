@@ -119,7 +119,7 @@ void __global__ gather2d(float2 *g, float2 *f, float *x, float *y, int m0,
       int ell0 = floorf(2 * n0 * x0) - m0 + i0;
       float w0 = ell0 / (float)(2 * n0) - x0;
       float w1 = ell1 / (float)(2 * n1) - y0;
-      float w = PI / sqrtf(mu0 * mu1 * ntheta) *
+      float w = PI / sqrtf(mu0 * mu1) *
                 __expf(-PI * PI / mu0 * (w0 * w0) - PI * PI / mu1 * (w1 * w1));
       int f_ind = n0 + m0 + ell0 + (2 * n0 + 2 * m0) * (n1 + m1 + ell1) +
                   (2 * n0 + 2 * m0) * (2 * n1 + 2 * m1) * tz;
