@@ -1,4 +1,4 @@
-"""This is the main entry point for building ptychotomo.
+"""This is the main entry point for building holotomo.
 The setup process for ptychocg is very much like any python module except
 that the compilation of the the extension module(s) is driven by CMake through
 scikit-build. Scikit-build defines a custom Extension class which calls CMake
@@ -14,9 +14,9 @@ from skbuild import setup
 from setuptools import find_packages
 
 setup(
-    name='ptychotomo',
+    name='holotomo',
     author='Viktor Nikitin',
-    version='0.2.0',
+    version='0.1.0',
     package_dir={"": "src"},
     packages=find_packages('src'),
     zip_safe=False,

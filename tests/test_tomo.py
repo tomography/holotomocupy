@@ -45,19 +45,3 @@ if __name__ == "__main__":
 
     print(f'Adjoint test for padded data: {np.sum(u*np.conj(u0))} ? {np.sum(data*np.conj(data))}')     
   
-    
-    # Conjugate gradient solver    
-    with holotomo.SolverTomo(theta, ntheta, nz, ne, pnz, center+(ne-n)/2) as tslv:
-        # simulate data
-        data = tslv.paddata(data, ne)
-        # cg solver
-        init = np.zeros([nz,ne,ne],dtype='complex64')
-        piter = 4
-        u = tslv.cg_tomo_batch(data,init,piter)
-        u = tslv.unpadobject(u, n)
-    # save generated data
-    dxchange.write_tiff_stack(u.real,f'data/test_tomo_operators/rec_real/r',overwrite=True)
-    dxchange.write_tiff_stack(u.imag,f'data/test_tomo_operators/rec_imag/r',overwrite=True)
-        
-    print('reconstructed object save to ./data/test_tomo_operators/rec_real{imag}')    
-    

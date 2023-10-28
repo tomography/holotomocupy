@@ -2,6 +2,7 @@
 
 import cupy as cp
 import numpy as np
+import cupyx.scipy.ndimage as ndimage
 from .holo import holo
 from .utils import chunk
 PLANCK_CONSTANT = 4.135667696e-18  # [keV*s]
@@ -92,7 +93,12 @@ class SolverHolo():
     
     def fwd_resample(self,f,magnification):
         """Data magnification via Fourier domain"""
+        # fr = ndimage.zoom(f,(1,magnification/2,magnification/2))
+        # st = (fr.shape[1])//2-self.n//2
+        # end = st+self.n
+        # fr = fr[:,st:end,st:end]
         
+        # print(fr.shape)
         xk = -((cp.arange(-self.n/2,self.n/2)/self.n)/magnification).astype('float32')
         [xk,yk] = cp.meshgrid(xk,xk)
         fr = cp.zeros([self.ptheta,self.n,self.n],dtype='complex64') 
@@ -104,7 +110,13 @@ class SolverHolo():
 
     def adj_resample(self,fr,magnification):
         """Adjoint to data magnification via Fourier domain"""
+        # f = cp.zeros([self.ptheta,2*self.n,2*self.n],dtype='complex64')
+        # fr = ndimage.zoom(fr,(1,2/magnification,2/magnification))
+       
+        # st = self.n-fr.shape[1]//2
+        # end = self.n-fr.shape[1]//2+fr.shape[1]
         
+        # f[:,st:end,st:end]=fr*(magnification/2)**2
         xk = -((cp.arange(-self.n/2,self.n/2)/self.n)/magnification).astype('float32')
         [xk,yk] = cp.meshgrid(xk,xk)
         f = cp.zeros([self.ptheta,2*self.n,2*self.n],dtype='complex64') 
@@ -143,6 +155,23 @@ class SolverHolo():
             data[i] = self.fwd_propagate(psir,self.fP[i])                            
         
         return data
+    
+    # def fwd_holo(self, psi, prb):
+    #     """holography transform: padding, magnification, multiplication by probe, Fresnel transform"""
+        
+    #     data = cp.zeros([len(self.distances),self.ptheta,self.nz, self.n], dtype='complex64')
+    #     #for itheta in range(self.ptheta):
+    #     # print(psi.shape)
+        
+    #     for i in range(len(self.distances)):                        
+    #         psi *= prb[i]
+    #         datar = self.fwd_propagate(psi,self.fP[i])                            
+    #         datar_pad = self.fwd_pad(datar)        
+    #         datar_pad = cp.ascontiguousarray(datar_pad)
+    #         data[i] = self.fwd_resample(datar_pad,self.magnification[i]*2)
+        
+        # return data
+
 
     def adj_holo(self, data, prb):
         """Adjoint holography transform wrt object (adjoint operations in reverse order))"""
@@ -154,6 +183,18 @@ class SolverHolo():
             psi_pad = self.adj_resample(psir,self.magnification[i]*2)
             psi += self.adj_pad(psi_pad)
         return psi
+    
+    # def adj_holo(self, data, prb):
+    #     """Adjoint holography transform wrt object (adjoint operations in reverse order))"""
+        
+    #     psi = cp.zeros([self.ptheta,self.nz, self.n], dtype='complex64')
+    #     for i in range(len(self.distances)):
+    #         datar_pad = self.adj_resample(data[i],self.magnification[i]*2)
+    #         datar = self.adj_pad(datar_pad)
+    #         psir = self.adj_propagate(datar,self.fP[i])       
+    #         psir *= cp.conj(prb[i])
+    #         psi += psir
+    #     return psi
     
     def cg_holo(self, data, init, prb,  piter):
         """Conjugate gradients method for holography"""
@@ -175,12 +216,11 @@ class SolverHolo():
                  #(cp.abs(fpsi)**2-data)*fpsi,prb)/maxprb**2
             
             # Dai-Yuan direction
-            #d=-grad
             if i == 0:
                 d = -grad
             else:
                 d = -grad+cp.linalg.norm(grad)**2 / \
-                    ((cp.sum(cp.conj(d)*(grad-grad0))))*d
+                    (1e-30+(cp.sum(cp.conj(d)*(grad-grad0))))*d
             grad0 = grad
             # line search
             fd = self.fwd_holo(d, prb)
@@ -221,7 +261,7 @@ class SolverHolo():
         res = np.zeros([self.ntheta, self.nz, self.n], dtype='complex64')
         prb_gpu = cp.array(prb)            
         for ids in chunk(range(self.ntheta), self.ptheta):
-            print(f'Processing angles: {ids}')
+            # print(f'Processing angles: {ids}')
             # copy data part to gpu
             data_gpu = cp.array(data[:,ids])
             init_gpu = cp.array(init[ids])

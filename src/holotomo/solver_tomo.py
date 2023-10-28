@@ -132,8 +132,7 @@ class SolverTomo(tomo):
                 d = -grad
             else:
                 d = -grad+cp.linalg.norm(grad)**2 / \
-                    (1e-15+(cp.sum(cp.conj(d)*(grad-grad0))))*d
-            print(cp.linalg.norm(d))
+                    (1e-30+(cp.sum(cp.conj(d)*(grad-grad0))))*d
             grad0 = grad
             # line search
             fd = self.fwd_tomo(d)
@@ -147,7 +146,6 @@ class SolverTomo(tomo):
         """Batch of Holography transforms"""
         res = np.zeros([self.nz, self.n, self.n], dtype='complex64')
         for ids in chunk(range(self.nz), self.pnz):
-            print(f'Processing slices: {ids}')
             # copy data part to gpu
             data_gpu = cp.ascontiguousarray(cp.array(data[:,ids]))
             init_gpu = cp.array(init[ids])

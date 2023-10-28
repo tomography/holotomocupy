@@ -4,11 +4,11 @@ import holotomo
 
 if __name__ == "__main__":
     # read object
-    n = 256  # object size n x,y
-    nz = 256 # object size in z    
+    n = 384  # object size n x,y
+    nz = 384 # object size in z    
     ntheta = 1  # number of angles (rotations)
 
-    pnz = 256 # tomography chunk size for GPU processing
+    pnz = 384 # tomography chunk size for GPU processing
     ptheta = 1 # holography chunk size for GPU processing
     
     center = n/2 # rotation axis
@@ -36,8 +36,8 @@ if __name__ == "__main__":
     print(f'normalized magnifications= {norm_magnifications}')
     
     # Load a 3D object and probe
-    beta = dxchange.read_tiff('data/beta-chip-256.tiff')
-    delta = dxchange.read_tiff('data/delta-chip-256.tiff')
+    beta = dxchange.read_tiff('data/beta-chip-384.tiff')
+    delta = dxchange.read_tiff('data/delta-chip-384.tiff')
     
     v = np.arange(-n//2,n//2)/n
     [vx,vy] = np.meshgrid(v,v)
@@ -53,8 +53,8 @@ if __name__ == "__main__":
     
     # load probes from ID16a recovered by NFP for 4 distances, crop it to the object size
     prb = np.zeros([len(distances),nz,n],dtype='complex64')    
-    prb_abs = dxchange.read_tiff_stack('data/prb_id16a/prb_abs_00000.tiff',ind=range(len(distances)))[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
-    prb_phase = dxchange.read_tiff_stack('data/prb_id16a/prb_phase_00000.tiff',ind=range(len(distances)))[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
+    prb_abs = dxchange.read_tiff(f'data/prb_id16a/prb_abs_{n}.tiff')#[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
+    prb_phase = dxchange.read_tiff(f'data/prb_id16a/prb_phase_{n}.tiff')#[:,1024-n//2:1024+n//2,1024-n//2:1024+n//2]
     prb[:] = prb_abs*np.exp(1j*prb_phase)   
     # compute tomographic projections
     with holotomo.SolverTomo(theta, ntheta, nz, n, pnz, center) as tslv:
@@ -86,12 +86,12 @@ if __name__ == "__main__":
         #compute adjoint transform
         psi0 = pslv.adj_holo_batch(fpsi, prb)
     print(f'Adjoint test: {np.sum(psi*np.conj(psi0))} ? {np.sum(fpsi*np.conj(fpsi))}')        
-    # exit()
-    print('Test reconstruction by CG')
-    piter = 64
-    init = psi*0+1
-    with holotomo.SolverHolo(ntheta, nz, n, ptheta, voxelsize, energy, distances, norm_magnifications)  as pslv:
-        rec = pslv.cg_holo_batch(data,init,prb,piter)
-        for k in range(ntheta):        
-            dxchange.write_tiff(np.abs(rec[k]),f'data/test_holo_operators/rec/abs_a{k}',overwrite=True)
-            dxchange.write_tiff(np.angle(rec[k]),f'data/test_holo_operators/rec/phase_a{k}',overwrite=True)
+    # # exit()
+    # print('Test reconstruction by CG')
+    # piter = 64
+    # init = psi*0+1
+    # with holotomo.SolverHolo(ntheta, nz, n, ptheta, voxelsize, energy, distances, norm_magnifications)  as pslv:
+    #     rec = pslv.cg_holo_batch(data,init,prb,piter)
+    #     for k in range(ntheta):        
+    #         dxchange.write_tiff(np.abs(rec[k]),f'data/test_holo_operators/rec/abs_a{k}',overwrite=True)
+    #         dxchange.write_tiff(np.angle(rec[k]),f'data/test_holo_operators/rec/phase_a{k}',overwrite=True)
