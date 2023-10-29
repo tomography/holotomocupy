@@ -6,7 +6,7 @@ see ? for details
 ## 1. create conda environment and install dependencies
 
 ```console
-conda create -n holotomo -c conda-forge cupy swig scikit-build dxchange xraylib
+conda create -n holotomo -c conda-forge cupy swig cmake scikit-build dxchange xraylib
 ```
 
 Note: CUDA drivers need to be installed before installation
