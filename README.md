@@ -1,7 +1,6 @@
 # holotomo
 Holotomographic reconstruction on GPU
 
-see ? for details
 
 ## 1. create conda environment and install dependencies
 
