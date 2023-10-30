@@ -10,9 +10,13 @@ conda create -n holotomo -c conda-forge cupy swig cmake scikit-build dxchange xr
 
 Note: CUDA drivers need to be installed before installation
 
-## 2. install
+## 2. clone the package and install it
 
 ```console
+git clone https://github.com/nikitinvv/holotomo
+
+cd holotomo
+
 pip install .
 ```
 
@@ -23,14 +27,14 @@ cd tests
 
 ```
 
-Adjoint test holography
+Adjoint test holography. Checking the equity: <G*Gf,f> ?= <Gf,Gf>
 
 ```console
 python test_holo.py
 
 ```
 
-Adjoint test tomography
+Adjoint test tomography. Checking the equity: <R*Rf,f> ?= <Rf,Rf> 
 
 ```console
 python test_tomo.py
