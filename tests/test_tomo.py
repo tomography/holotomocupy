@@ -14,12 +14,14 @@ if __name__ == "__main__":
     center = n/2 # rotation axis
     theta = np.linspace(0, np.pi, ntheta).astype('float32') # projection angles
     # Load a 3D object 
-    beta0 = dxchange.read_tiff('data/beta-chip-256.tiff')#[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
-    delta0 = dxchange.read_tiff('data/delta-chip-256.tiff')#[128-nz//2:128+nz//2,128-n//2:128+n//2,128-n//2:128+n//2]
-    delta = np.zeros([nz,n,n],dtype='complex64') 
-    beta = np.zeros([nz,n,n],dtype='complex64')
-    delta[nz//2-128:nz//2+128,n//2-128:n//2+128,n//2-128:n//2+128]= delta0
-    beta[nz//2-128:nz//2+128,n//2-128:n//2+128,n//2-128:n//2+128]= beta0
+    beta0 = dxchange.read_tiff('data/beta-chip-192.tiff')
+    delta0 = dxchange.read_tiff('data/delta-chip-192.tiff')
+    
+    #pad with zeros
+    beta = np.zeros([nz,n,n],dtype='float32')
+    delta = np.zeros([nz,n,n],dtype='float32')
+    delta[nz//2-96:nz//2+96,n//2-96:n//2+96,n//2-96:n//2+96] = delta0
+    beta[nz//2-96:nz//2+96,n//2-96:n//2+96,n//2-96:n//2+96] = beta0
 
     u = delta+1j*beta
     

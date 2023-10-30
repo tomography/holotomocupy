@@ -35,19 +35,16 @@ if __name__ == "__main__":
     print(f'{magnifications=}')    
     print(f'normalized magnifications= {norm_magnifications}')
     
-    # Load a 3D object and probe
-    beta = dxchange.read_tiff('data/beta-chip-384.tiff')
-    delta = dxchange.read_tiff('data/delta-chip-384.tiff')
+    # Load a 3D object 
+    beta0 = dxchange.read_tiff('data/beta-chip-192.tiff')
+    delta0 = dxchange.read_tiff('data/delta-chip-192.tiff')
     
-    v = np.arange(-n//2,n//2)/n
-    [vx,vy] = np.meshgrid(v,v)
-    v=np.exp(-10*(vx**2+vy**2))*10
-    delta = np.fft.fftshift(np.fft.ifft2(np.fft.fftshift(np.fft.fftshift(np.fft.fft2(np.fft.fftshift(delta))*v)))).real
-    beta = np.fft.fftshift(np.fft.ifft2(np.fft.fftshift(np.fft.fftshift(np.fft.fft2(np.fft.fftshift(beta))*v)))).real
-    delta[delta>0]=0
-    beta[beta<0]=0
+    #pad with zeros
+    beta = np.zeros([nz,n,n],dtype='float32')
+    delta = np.zeros([nz,n,n],dtype='float32')
+    delta[nz//2-96:nz//2+96,n//2-96:n//2+96,n//2-96:n//2+96] = delta0
+    beta[nz//2-96:nz//2+96,n//2-96:n//2+96,n//2-96:n//2+96] = beta0    
     
-    delta/=6# /6 to avoid phase wrapping
     u = delta+1j*beta
     u = u.astype('complex64')
     
