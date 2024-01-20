@@ -6,7 +6,7 @@ import cupyx.scipy.ndimage as ndimage
 from .holo import holo
 from .utils import chunk
 PLANCK_CONSTANT = 4.135667696e-18  # [keV*s]
-SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
+SPEED_OF_LIGHT = 299792458  # [m/s]
 
 
 class SolverHolo():
@@ -40,11 +40,7 @@ class SolverHolo():
         """Free GPU memory due at interruptions or with-block exit."""
         #self.free()
         pass
-
-    #def wavenumber(self):
-        #"""Wave number index"""
-        #return 2 * np.pi / (2 * np.pi * PLANCK_CONSTANT * SPEED_OF_LIGHT / self.energy)
-
+    
     def wavelength(self):
         """Wavelength"""
         return PLANCK_CONSTANT * SPEED_OF_LIGHT / self.energy
