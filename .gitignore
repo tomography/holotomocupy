@@ -220,4 +220,4 @@ prb
 
 *.png
 .loglogin
-*.tiff
+*.npy
