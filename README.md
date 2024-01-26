@@ -58,7 +58,9 @@ Modeling without flat fields can be done by setting prb[:] = 1
 
 *probe_tests.ipynb* - propagation tests for the probes recovered by the NFP
 
+*data_modeling_siemens_codes.ipynb* - data modeling with structure illumination
 
+*iterative_reconstruction_siemens_codes.ipynb* - reconstruction with structure illumination
 
 
 ### *DTU installation and run jupyter notebook
