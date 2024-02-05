@@ -19,7 +19,6 @@ ncodes = int(sys.argv[4])
 use_prb = sys.argv[5]
 use_codes = sys.argv[6]
 nerr_th = float(sys.argv[7])
-noise = sys.argv[8]
 PLANCK_CONSTANT = 4.135667696e-18  # [keV*s]
 SPEED_OF_LIGHT = 299792458  # [m/s]
 
@@ -80,16 +79,17 @@ distances2 = distances2*(z1/z1p)**2
 
 # np.save('star.npy',star)
 
-star = np.load('star.npy')
-
+# star = np.load('star.npy')
+star = tifffile.imread('/data/holo/data.tiff')#*0+np.random.random(star.shape)
 
 
 
 # exit()
-delta = 1-xraylib.Refractive_Index_Re('Au',energy,19.3)
-beta = xraylib.Refractive_Index_Im('Au',energy,19.3)
-
-thickness = 600e-9/voxelsize # siemens star thickness in pixels
+# delta = 1-xraylib.Refractive_Index_Re('Au',energy,19.3)
+# beta = xraylib.Refractive_Index_Im('Au',energy,19.3)
+delta = 1-xraylib.Refractive_Index_Re('(C5O2H8)n',energy,1.18)
+beta = xraylib.Refractive_Index_Im('(C5O2H8)n',energy,1.18)
+thickness = 10*600e-9/voxelsize # siemens star thickness in pixels
 # form Transmittance function
 u = star*(-delta+1j*beta) # note -delta
 Ru = u*thickness 
@@ -110,6 +110,17 @@ for k in  range(ill.shape[0]):
     ill[k] = ill0[ill0.shape[0]//2-nill//2:ill0.shape[0]//2+(nill)//2,ill0.shape[1]//2-nill//2:ill0.shape[1]//2+(nill)//2]#.reshape(nill,nill)
 ill = ndimage.zoom(ill,[1,n/nill,n/nill],order=0,grid_mode=True,mode='grid-wrap')
 
+v = np.arange(-n//2,n//2)/n
+[vx,vy] = np.meshgrid(v,v)
+v = np.exp(-50*(vx**2+vy**2))
+fill = np.fft.fftshift(np.fft.fftn(np.fft.fftshift(ill)))
+ill = np.fft.fftshift(np.fft.ifftn(np.fft.fftshift(fill*v))).real.astype('float32')
+tifffile.imwrite(f'/data/holo/brain_code{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',ill[0])
+# print(np.amax(np.abs(psiill)))
+exit()
+
+
+
 delta = 1-xraylib.Refractive_Index_Re('Au',energy,19.3)
 beta = xraylib.Refractive_Index_Im('Au',energy,19.3)
 
@@ -119,28 +130,21 @@ thickness = 3*1e-6/voxelsize # thickness in pixels
 Rill = ill*(-delta+1j*beta)*thickness 
 psiill = np.exp(1j * Rill * voxelsize * 2 * np.pi / pslv.wavelength()).astype('complex64')
 
-tifffile.imwrite(f'/data/holo/code_amp.tiff',np.abs(psiill))
-tifffile.imwrite(f'/data/holo/code_angle.tiff',np.angle(psiill))
-    
 if use_codes=='False':
     psiill[:] = 1
 
 fpsi = pslv.fwd_holo_batch(psi,prb,psiill)
 data = np.abs(fpsi)**2
-if noise:
-    data = np.random.poisson(data*100).astype('float32')/100
-data =data.astype('float32')
 
-tifffile.imwrite(f'/data/holo/datanoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',data[0])
 prb = prb[:ncodes]
 data = data[:ncodes]
 distances = distances[:ncodes]
 distances2 = distances2[:ncodes]
 pslv = holotomo.SolverHolo(1, nz, n, 1, voxelsize, energy, distances, norm_magnifications,distances2)
-piter = 128
+piter = 4000
 
 init = np.ones([1,nz,n],dtype='complex64')  # initial guess
-rec, conv = cg_holo_batch(pslv, data, init, prb,  piter,nerr_th,psiill)
+rec = cg_holo_batch(pslv, data, init, prb,  piter,nerr_th,psiill)
 a = np.angle(rec[0])
 b = np.angle(psi[0])
 a-=np.mean(a)
@@ -150,9 +154,8 @@ data_range=np.amax(b)-np.amin(b)
 psnr = np.linalg.norm(rec-psi)
 
 
-print(f'noise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes} {psnr=} {ssim=}')
-tifffile.imwrite(f'/data/holo/datanoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',data[0])
-tifffile.imwrite(f'/data/holo/recnoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',np.angle(rec))
-np.save(f'res_numpy/pnsrnoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_prb{use_prb}_code{use_codes}',psnr)
-np.save(f'res_numpy/ssimnoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_prb{use_prb}_code{use_codes}',ssim)
-np.save(f'res_numpy/convnoise{noise}{imsize}_{code_position}mm_{code_size}um_{ncodes}_prb{use_prb}_code{use_codes}',conv)
+print(f'{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes} {psnr=} {ssim=}')
+tifffile.imwrite(f'/data/holo/brain_data{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',data[0])
+tifffile.imwrite(f'/data/holo/brain_rec{imsize}_{code_position}mm_{code_size}um_{ncodes}_{use_prb}_{use_codes}.tiff',np.angle(rec))
+np.save(f'res_numpy/brain_pnsr{imsize}_{code_position}mm_{code_size}um_{ncodes}_prb{use_prb}_code{use_codes}',psnr)
+np.save(f'res_numpy/brain_ssim{imsize}_{code_position}mm_{code_size}um_{ncodes}_prb{use_prb}_code{use_codes}',ssim)

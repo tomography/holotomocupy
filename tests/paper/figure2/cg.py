@@ -22,6 +22,7 @@ def cg_holo(pslv, data, init, prb,  piter, nerr_th, codes=None):
     psi = init.copy()
     norm_data = np.linalg.norm(data)
     maxprb = cp.max(cp.abs(prb))
+    conv = np.zeros(piter)
     for i in range(piter):
         fpsi = pslv.fwd_holo(psi,prb,codes)
         grad = pslv.adj_holo(
@@ -42,7 +43,7 @@ def cg_holo(pslv, data, init, prb,  piter, nerr_th, codes=None):
         psi = psi + gamma*d
         err=minf(psi,fpsi)
         nerr = err/norm_data
-        
+        conv[i] = err
         print(f'{i}) {gamma=}, {err=:1.2e}, {nerr=:1.2e}')    
         if nerr<nerr_th:            
             print(f'stopped at {i}')                        
@@ -51,7 +52,7 @@ def cg_holo(pslv, data, init, prb,  piter, nerr_th, codes=None):
             
             
     
-    return psi
+    return psi, conv
 
 def cg_holo_batch(pslv, data, init, prb, piter, nerr_th, codes=None):
     """Batch of CG solvers"""
@@ -68,8 +69,8 @@ def cg_holo_batch(pslv, data, init, prb, piter, nerr_th, codes=None):
         init_gpu = cp.array(init[ids])
         
         # Radon transform
-        res_gpu = cg_holo(pslv, data_gpu, init_gpu,prb_gpu, piter, nerr_th, codes_gpu)
+        res_gpu,conv = cg_holo(pslv, data_gpu, init_gpu,prb_gpu, piter, nerr_th, codes_gpu)
         # copy result to cpu
         res[ids] = res_gpu.get()
-    return res
+    return res,conv
 

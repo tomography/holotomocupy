@@ -23,16 +23,16 @@ class SolverHolo():
         self.magnification = magnification
         
         # Precalculate Fresnel propagators for different distances
-        self.fP = cp.zeros([len(distances),nz,n],dtype='complex64')
-        self.fP2 = cp.zeros([len(distances),nz,n],dtype='complex64')
+        self.fP = cp.zeros([len(distances),2*nz,2*n],dtype='complex64')
+        self.fP2 = cp.zeros([len(distances),2*nz,2*n],dtype='complex64')
         for k in distances:
-            fx = cp.fft.fftshift(cp.fft.fftfreq(n,d=voxelsize))
+            fx = cp.fft.fftshift(cp.fft.fftfreq(2*n,d=voxelsize))
             [fx,fy] = cp.meshgrid(fx,fx)
             for i,d in enumerate(distances):
-                self.fP[i] = cp.exp(-1j*cp.pi*self.wavelength()*d*(fx**2+fy**2))
+                self.fP[i] = cp.exp(-1j*cp.pi*self.wavelength()*d*(fx**2+fy**2))/4
             if distances2 is not None:
                 for i,d in enumerate(distances2):
-                    self.fP2[i] = cp.exp(-1j*cp.pi*self.wavelength()*d*(fx**2+fy**2))
+                    self.fP2[i] = cp.exp(-1j*cp.pi*self.wavelength()*d*(fx**2+fy**2))/4
         
         #CUDA C class for faster USFFT and padding
         self.cl_holo = holo(2*n,2*nz, ptheta)
@@ -129,17 +129,20 @@ class SolverHolo():
     def fwd_propagate(self,f,fP):
         """Fresnel transform"""
         
-        ff = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
+        ff = self.fwd_pad(f)
+        ff = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(ff)))
         ff = ff*fP
         ff = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(ff)))
+        ff = self.adj_pad(ff)
         return ff
     
     def adj_propagate(self,ff,fP):
         """Adjoint to Fresnel transform"""
-        
-        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(ff)))
+        f = self.fwd_pad(ff)
+        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
         f = f*cp.conj(fP) 
         f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f)))
+        f = self.adj_pad(f)
         return f
         
     def fwd_holo(self, psi, prb, codes=None):
@@ -193,6 +196,22 @@ class SolverHolo():
             psi += self.adj_pad(psi_pad)
             # psi += psir
         return psi
+
+    def adj_holo_prb(self, data, psi, codes=None):
+        """Adjoint holography transform wrt object (adjoint operations in reverse order))"""
+        
+        prb = cp.zeros([len(self.distances),self.nz, self.n], dtype='complex64')
+        for i in range(len(self.distances)):
+            prbr = data[i].copy()
+            if codes is not None:
+                prbr = self.adj_propagate(prbr,self.fP2[i])       
+                prbr *= cp.conj(codes[i])
+            prbr = self.adj_propagate(prbr,self.fP[i])       
+            prbr *= cp.conj(psi[0]) #probably sum over angles needed
+            prb_pad = self.adj_resample(prbr,self.magnification[i]*2)
+            prb[i] = self.adj_pad(prb_pad)
+            # psi += psir
+        return prb
     
     # def adj_holo(self, data, prb):
     #     """Adjoint holography transform wrt object (adjoint operations in reverse order))"""

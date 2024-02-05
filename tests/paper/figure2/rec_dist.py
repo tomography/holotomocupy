@@ -13,7 +13,7 @@ SPEED_OF_LIGHT = 299792458  # [m/s]
 n = 2048  # object size in x,y
 nz = 2048  # object size in z    
 ntheta = 1  # number of angles (rotations)
-
+noise='True'
 pnz = nz # tomography chunk size for GPU processing 
 ptheta = ntheta # holography chunk size for GPU processing
 
@@ -72,42 +72,50 @@ u = star*(-delta+1j*beta) # note -delta
 Ru = u*thickness 
 psi = np.exp(1j * Ru * voxelsize * 2 * np.pi / wavelength)[np.newaxis].astype('complex64')
 # tifffile.imwrite('data/psi_amp.tiff',np.abs(psi),)
-# tifffile.imwrite('data/psi_angle.tiff',np.angle(psi))
+tifffile.imwrite('data/psi_angle.tiff',np.angle(psi))
 
 
 
 pslv = holotomo.SolverHolo(ntheta, nz, n, ptheta, voxelsize, energy, distances, norm_magnifications)
 prb = np.ones([len(distances),nz,n],dtype='complex64')
 prb = tifffile.imread(f'data/prb_abs_{n}.tiff')*np.exp(1j* tifffile.imread(f'data/prb_phase_{n}.tiff'))
-
+prb[:] = 1
 fpsi = pslv.fwd_holo_batch(psi,prb)
 data = np.abs(fpsi)**2
 
-# for k in range(len(distances)):    
-    # tifffile.imwrite(f'data/data_{k}.tiff',data[k])
-# exit()
+if noise:
+    data = np.random.poisson(data*50).astype('float32')/50
+data =data.astype('float32')
+
+for k in range(len(distances)):    
+    tifffile.imwrite(f'data/data_{k}.tiff',data[k])
+
 data0 = data.copy()
 prb0 = prb.copy()
 distances0 = distances.copy()
 
 from cg import cg_holo_batch    
 err = np.zeros(4)
-for k in range(1,5):
+for k in range(4,5):
     rec_distances = k
     prb = prb0[:rec_distances]
     data = data0[:rec_distances]
     distances = distances0[:rec_distances]
     pslv = holotomo.SolverHolo(ntheta, nz, n, ptheta, voxelsize, energy, distances, norm_magnifications)
-    piter = 1000000#512*(k+1) # number of CG iters
-    nerr_th = 1e-4
+    piter = 128#512*(k+1) # number of CG iters
+    nerr_th = 1e-10
     init = np.ones([ntheta,nz,n],dtype='complex64')  # initial guess
-    rec = cg_holo_batch(pslv, data, init, prb,  piter,nerr_th)
-    tifffile.imwrite(f'data/rec_amp_{k}dist.tiff',np.abs(rec))
-    tifffile.imwrite(f'data/rec_angle_{k}dist.tiff',np.angle(rec))
+    rec, conv = cg_holo_batch(pslv, data, init, prb,  piter,nerr_th)
+    tifffile.imwrite(f'/data/holo/rec_amp_{k}dist{piter}.tiff',np.abs(rec))
+    tifffile.imwrite(f'/data/holo/rec_angle_noise{noise}_{k}dist{piter}.tiff',np.angle(rec))
     a = np.angle(rec[0])
     b = np.angle(psi[0])
     a-=np.mean(a)
     b-=np.mean(b)
     data_range=np.amax(b)-np.amin(b)
-    (score, diff) = structural_similarity(a,b, full=True,data_range=data_range)
-    print(f'ndist={k} error={np.linalg.norm(rec-psi)} ssim {score} data/rec_angle_{k}dist.tiff')
+    (ssim, diff) = structural_similarity(a,b, full=True,data_range=data_range)
+    psnr = np.linalg.norm(rec-psi)
+    print(f'ndist={k} error={np.linalg.norm(rec-psi)} ssim {ssim} data/rec_angle_{k}dist.tiff')
+    np.save(f'res_numpy/pnsrnoise{noise}{k}dist{piter}',psnr)
+    np.save(f'res_numpy/ssimnoise{noise}{k}dist{piter}',ssim)
+    np.save(f'res_numpy/convnoise{noise}{k}dist{piter}',conv)
