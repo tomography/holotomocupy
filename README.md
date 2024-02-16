@@ -5,12 +5,16 @@ Holotomographic reconstruction on GPU
 ## 1. create conda environment and install dependencies
 
 ```console
-conda create -n holotomo -c conda-forge cupy swig cmake scikit-build dxchange xraylib matplotlib jupyter astropy olefile
+conda create -n holotomo -c conda-forge cupy swig cmake scikit-build dxchange xraylib matplotlib jupyter astropy olefile ninja
 ```
 
 Note: CUDA drivers need to be installed before installation
 
-## 2. clone the package and install it
+## 3. Export the appropriate CUDA configuration
+
+export CUDACXX=/local/cuda-11.7/bin/nvcc
+
+## 3. clone the package and install it
 
 ```console
 git clone https://github.com/nikitinvv/holotomo
@@ -20,7 +24,7 @@ cd holotomo
 pip install .
 ```
 
-## 3. check adjoint tests
+## 4. check adjoint tests
 
 ```console
 cd tests
@@ -41,7 +45,7 @@ python test_tomo.py
 
 ```
 
-## 4. See jupyter notebook for examples of reconstructions
+## 5. See jupyter notebook for examples of reconstructions
 
 *data_modeling_chip.ipynb* - generate data for a chip 
 
