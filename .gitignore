@@ -221,3 +221,6 @@ prb
 *.png
 .loglogin
 *.npy
+*.tiff
+bq
+old_ipynb

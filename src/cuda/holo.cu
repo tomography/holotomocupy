@@ -84,7 +84,7 @@ void holo::adj_usfft(size_t f_, size_t g_, size_t x_, size_t y_, size_t stream_)
   divker2d<<<GS2d0, BS2d, 0,stream>>>(fdee2d, f, n0, n1, ntheta, m0, m1, mu0, mu1, 1);
 }
 
-void holo::fwd_padsym(size_t g_, size_t f_, size_t pad_width, size_t stream_)
+void holo::fwd_padsym(size_t g_, size_t f_, size_t pad_width, size_t ns, size_t stream_)
 {
   f = (float2 *)f_;
   g = (float2 *)g_;
@@ -93,11 +93,11 @@ void holo::fwd_padsym(size_t g_, size_t f_, size_t pad_width, size_t stream_)
   stream = (cudaStream_t)stream_;    
   
   
-  dim3 GS = dim3(ceil((n00+2*pad_width) / (float)BS2d.x), ceil((n11+2*pad_width) / (float)BS2d.y), ceil(ntheta / (float)BS2d.z));
-  pad_sym <<<GS, BS2d, 0,stream>>> (g,f,pad_width,n00,n11,ntheta,0);  
+  dim3 GS = dim3(ceil((n00+2*pad_width) / (float)BS2d.x), ceil((n11+2*pad_width) / (float)BS2d.y), ceil(ns / (float)BS2d.z));
+  pad_sym <<<GS, BS2d, 0,stream>>> (g,f,pad_width,n00,n11,ns,0);  
 }
 
-void holo::adj_padsym(size_t g_, size_t f_, size_t pad_width, size_t stream_)
+void holo::adj_padsym(size_t g_, size_t f_, size_t pad_width, size_t ns,  size_t stream_)
 {
   f = (float2 *)f_;
   g = (float2 *)g_;
@@ -105,6 +105,6 @@ void holo::adj_padsym(size_t g_, size_t f_, size_t pad_width, size_t stream_)
   int n11 = n1/2;
   stream = (cudaStream_t)stream_;    
   
-  dim3 GS = dim3(ceil((n00+2*pad_width) / (float)BS2d.x), ceil((n11+2*pad_width) / (float)BS2d.y), ceil(ntheta / (float)BS2d.z));
-  pad_sym <<<GS, BS2d, 0,stream>>> (f,g,pad_width,n00,n11,ntheta,1);  
+  dim3 GS = dim3(ceil((n00+2*pad_width) / (float)BS2d.x), ceil((n11+2*pad_width) / (float)BS2d.y), ceil(ns / (float)BS2d.z));
+  pad_sym <<<GS, BS2d, 0,stream>>> (f,g,pad_width,n00,n11,ns,1);  
 }

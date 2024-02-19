@@ -72,11 +72,11 @@ class holo(object):
     def adj_usfft(self, g_, f_, x_, y_, stream_):
         return _holo.holo_adj_usfft(self, g_, f_, x_, y_, stream_)
 
-    def fwd_padsym(self, g_, f_, pad_width, stream_):
-        return _holo.holo_fwd_padsym(self, g_, f_, pad_width, stream_)
+    def fwd_padsym(self, g_, f_, pad_width, ns, stream_):
+        return _holo.holo_fwd_padsym(self, g_, f_, pad_width, ns, stream_)
 
-    def adj_padsym(self, g_, f_, pad_width, stream_):
-        return _holo.holo_adj_padsym(self, g_, f_, pad_width, stream_)
+    def adj_padsym(self, g_, f_, pad_width, ns, stream_):
+        return _holo.holo_adj_padsym(self, g_, f_, pad_width, ns, stream_)
 
     def free(self):
         return _holo.holo_free(self)

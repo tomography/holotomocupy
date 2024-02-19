@@ -14,8 +14,8 @@ public:
   ~holo();  
   void fwd_usfft(size_t g_, size_t f_, size_t x_, size_t y_, size_t stream_);
   void adj_usfft(size_t g_, size_t f_, size_t x_, size_t y_,  size_t stream_);
-  void fwd_padsym(size_t g_, size_t f_, size_t pad_width,  size_t stream_);
-  void adj_padsym(size_t g_, size_t f_, size_t pad_width,  size_t stream_);
+  void fwd_padsym(size_t g_, size_t f_, size_t pad_width, size_t ns, size_t stream_);
+  void adj_padsym(size_t g_, size_t f_, size_t pad_width, size_t ns, size_t stream_);
   
   void free();
 };
