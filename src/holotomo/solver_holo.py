@@ -166,14 +166,20 @@ class SolverHolo():
         res = cp.fft.ifft2(shift*np.fft.fft2(psi)).astype('complex64')
         return res
 
-    def fwd_holo(self, psi, prb, shift=None):
+    def fwd_holo(self, psi, prb, shift=None, code=None, shift_code=None):
         """holography transform: padding, magnification, multiplication by probe, Fresnel transform"""
         data = cp.zeros([len(self.distances), self.ptheta,
                         self.n, self.n], dtype='complex64')
         for i in range(len(self.distances)):
             prbr = prb.copy()
             psir = psi.copy()
-            
+            # coder = code.copy()
+            if shift_code is not None:    # shift in scaled coordinates
+                coder = self.apply_shift_complex(code, shift_code[i])
+                # print(coder.shape)
+                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+            if code is not None: # multiple the code and probe                
+                prbr = prbr*coder            
             if self.distances2 is not None:  # propagate the probe from plane 0 to plane i
                 prbr = self.fwd_propagate(prbr, self.fP2[i])
             if shift is not None:    # shift in scaled coordinates
@@ -181,8 +187,7 @@ class SolverHolo():
             # scale object
             psir = self.fwd_resample(psir, self.magnification[i]*2)
             # multiply the probe and object
-            psir *= prbr
-            
+            psir *= prbr            
             # propagate both
             psir = self.fwd_propagate(psir, self.fP[i])
             
@@ -190,13 +195,20 @@ class SolverHolo():
         # data /= len(self.distances)
         return data
 
-    def adj_holo(self, data, prb, shift=None):
+    def adj_holo(self, data, prb, shift=None, code=None, shift_code=None):
         """Adjoint holography transform wrt object (adjoint operations in reverse order))"""
 
         psi = cp.zeros([self.ptheta, 2*self.n, 2*self.n], dtype='complex64')
         for i in range(len(self.distances)):
             psir = data[i].copy()
             prbr = prb.copy()
+            # coder = code.copy()
+            if shift_code is not None:    # shift code
+                coder = self.apply_shift_complex(code, shift_code[i])
+                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+                        
+            if code is not None:
+                prbr = prbr*coder                        
             # propagate data back
             psir = self.adj_propagate(psir, self.fP[i])
             if self.distances2 is not None:  # propagate the probe from plane 0 to plane i
@@ -205,18 +217,20 @@ class SolverHolo():
             psir *= cp.conj(prbr)
             # scale object
             psir = self.adj_resample(psir, self.magnification[i]*2)
+            # psir = cp.pad(psir,((0,0),(self.n//2,self.n//2),(self.n//2,self.n//2)))
             if shift is not None:  # shift object back
                 psir = self.apply_shift_complex(psir, -shift[i])
             psi += psir
         # psi /= len(self.distances)
         return psi
 
-    def adj_holo_prb(self, data, psi, shift=None):
+    def adj_holo_prb(self, data, psi,  shift=None, code=None, shift_code=None):
         """Adjoint holography transform wrt object (adjoint operations in reverse order))"""
         prb = cp.zeros([1, self.n, self.n], dtype='complex64')
         for i in range(len(self.distances)):
             prbr = data[i].copy()
             psir = psi.copy()
+            # coder = code.copy()
             # propagate data back
             prbr = self.adj_propagate(prbr, self.fP[i])
             if shift is not None:
@@ -229,47 +243,73 @@ class SolverHolo():
             prbr *= cp.conj(psir)
             if self.distances2 is not None:
                 prbr = self.adj_propagate(prbr, self.fP2[i])
+            
+            if shift_code is not None:    # shift code
+                coder = self.apply_shift_complex(code, shift_code[i])                        
+                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+            if code is not None:
+                prbr = prbr*cp.conj(coder)                                       
             prb += cp.sum(prbr,axis=0)
         # prb /= len(self.distances)
         return prb
 
-    def fwd_holo_batch(self, psi, prb,  shifts=None):
+    def fwd_holo_batch(self, psi, prb,  shifts=None, code=None, shifts_code=None):
         """Batch of Holography transforms"""
         res = np.zeros([len(self.distances), self.ntheta,
                        self.n, self.n], dtype='complex64')
         prb_gpu = cp.array(prb)
-        shifts_gpu = None
+        
+        shifts_gpu = None        
+        shifts_code_gpu = None
+        code_gpu = None
+
+        if code is not None:
+            code_gpu = cp.array(code)        
         for ids in chunk(range(self.ntheta), self.ptheta):
             # copy data part to gpu
             psi_gpu = cp.array(psi[ids])
             if shifts is not None:
                 shifts_gpu = cp.array(shifts[:,ids])
+            if shifts_code is not None:
+                shifts_code_gpu = cp.array(shifts_code[:,ids])
+            
             # Radon transform
-            res_gpu = self.fwd_holo(psi_gpu, prb_gpu, shifts_gpu)
+            res_gpu = self.fwd_holo(psi_gpu, prb_gpu, shifts_gpu, code_gpu, shifts_code_gpu)
             # copy result to cpu
             res[:, ids] = res_gpu.get()
         return res
 
-    def adj_holo_batch(self, fpsi, prb, shifts=None):
+    def adj_holo_batch(self, fpsi, prb, shifts=None, code=None, shifts_code=None):
         """Batch of Holography transforms"""
         res = np.zeros([self.ntheta, 2*self.n, 2*self.n], dtype='complex64')
         prb_gpu = cp.array(prb)
-        shifts_gpu = None
+        shifts_gpu = None        
+        shifts_code_gpu = None
+        code_gpu = None
+
+        if code is not None:
+            code_gpu = cp.array(code)   
         for ids in chunk(range(self.ntheta), self.ptheta):
             # copy data part to gpu
             fpsi_gpu = cp.array(fpsi[:, ids])
             if shifts is not None:
                 shifts_gpu = cp.array(shifts[:,ids])
+            if shifts_code is not None:
+                shifts_code_gpu = cp.array(shifts_code[:,ids])
             # Radon transform
-            res_gpu = self.adj_holo(fpsi_gpu, prb_gpu, shifts_gpu)
+            res_gpu = self.adj_holo(fpsi_gpu, prb_gpu, shifts_gpu, code_gpu, shifts_code_gpu)
             # copy result to cpu
             res[ids] = res_gpu.get()
         return res
 
-    def adj_holo_prb_batch(self, fpsi, psi, shifts=None):
+    def adj_holo_prb_batch(self, fpsi, psi, shifts=None, code=None, shifts_code=None):
         """Batch of Holography transforms"""
         res = np.zeros([1, self.n, self.n], dtype='complex64')
-        shifts_gpu = None
+        shifts_gpu = None        
+        shifts_code_gpu = None
+        code_gpu = None
+        if code is not None:
+            code_gpu = cp.array(code)   
         for ids in chunk(range(self.ntheta), self.ptheta):
             # copy data part to gpu
             fpsi_gpu = cp.array(fpsi[:, ids])
@@ -277,8 +317,10 @@ class SolverHolo():
             
             if shifts is not None:
                 shifts_gpu = cp.array(shifts[:,ids])
+            if shifts_code is not None:
+                shifts_code_gpu = cp.array(shifts_code[:,ids])
             # Radon transform
-            res_gpu = self.adj_holo_prb(fpsi_gpu, psi_gpu, shifts_gpu)
+            res_gpu = self.adj_holo_prb(fpsi_gpu, psi_gpu, shifts_gpu,code_gpu,shifts_code_gpu)
             # copy result to cpu
             res += res_gpu.get()
         return res

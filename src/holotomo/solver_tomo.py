@@ -111,7 +111,7 @@ class SolverTomo(tomo):
             gamma = 0
         return gamma
     
-    def cg_tomo(self, data, init, piter):
+    def cg_tomo(self, data, init, piter, dbg_step=1):
         """Conjugate gradients method for tomography"""
 
         # minimization functional
@@ -138,11 +138,12 @@ class SolverTomo(tomo):
             fd = self.fwd_tomo(d)
             gamma = self.line_search(minf, gamma, u, fu, d, fd)
             u = u + gamma*d
-            print(f'{i}) {gamma=}, err={minf(u,fu)}')
+            if i%dbg_step==0:
+                print(f'{i}) {gamma=}, err={minf(u,fu)}')
         
         return u
 
-    def cg_tomo_batch(self, data, init, piter):
+    def cg_tomo_batch(self, data, init, piter, dbg_step=1):
         """Batch of Holography transforms"""
         res = np.zeros([self.nz, self.n, self.n], dtype='complex64')
         for ids in chunk(range(self.nz), self.pnz):
@@ -150,7 +151,7 @@ class SolverTomo(tomo):
             data_gpu = cp.ascontiguousarray(cp.array(data[:,ids]))
             init_gpu = cp.array(init[ids])
             # Radon transform
-            res_gpu = self.cg_tomo(data_gpu, init_gpu, piter)
+            res_gpu = self.cg_tomo(data_gpu, init_gpu, piter, dbg_step)
             # copy result to cpu
             res[ids] = res_gpu.get()
         return res
