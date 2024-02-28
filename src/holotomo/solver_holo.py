@@ -182,8 +182,8 @@ class SolverHolo():
             #     prbr = prbr*coder            
             if self.distances2 is not None:  # propagate the probe from plane 0 to plane i
                 prbr = self.fwd_propagate(prbr, self.fP2[i])
-            # if shift is not None:    # shift in scaled coordinates
-            #     psir = self.apply_shift_complex(psir, shift[i])
+            if shift is not None:    # shift in scaled coordinates
+                psir = self.apply_shift_complex(psir, shift[i])
             # # scale object
             psir = self.fwd_resample(psir, self.magnification[i]*2)
             # # multiply the probe and object
