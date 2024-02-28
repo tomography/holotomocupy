@@ -30,11 +30,11 @@ class SolverHolo():
             [fx, fy] = cp.meshgrid(fx, fx)
             for i, d in enumerate(distances):
                 self.fP[i] = cp.exp(-1j*cp.pi*self.wavelength()
-                                    * d*(fx**2+fy**2))/4
+                                    * d*(fx**2+fy**2))
             if distances2 is not None:
                 for i, d in enumerate(distances2):
                     self.fP2[i] = cp.exp(-1j*cp.pi *
-                                         self.wavelength()*d*(fx**2+fy**2))/4
+                                         self.wavelength()*d*(fx**2+fy**2))
 
         # CUDA C class for faster USFFT and padding
         self.cl_holo = holo(2*n, 2*n, ptheta)
@@ -84,8 +84,8 @@ class SolverHolo():
                         self.n+2*pad_width], dtype='complex64')
         # symmetric padding (CUDA C)
         self.cl_holo.fwd_padsym(fpad.data.ptr, f.data.ptr, pad_width,f.shape[0], 0)
-        # fpad = cp.pad(f,((0,0),(pad_width,pad_width),(pad_width,pad_width)))
-        return fpad
+        # fpad = cp.pad(f,((0,0),(pad_width,pad_width),(pad_width,pad_width)),'constant',constant_values=1)
+        return fpad/2
 
     def adj_pad(self, fpad):
         """Adjoint operator for data padding"""
@@ -95,7 +95,7 @@ class SolverHolo():
         # Adjoint to symmetric padding
         self.cl_holo.adj_padsym(f.data.ptr, fpad.data.ptr, pad_width,fpad.shape[0], 0)
         # f = fpad[:,pad_width:-pad_width,pad_width:-pad_width]
-        return f
+        return f/2
 
     def fwd_resample(self, f, magnification):
         # """Data magnification via Fourier domain"""
@@ -173,20 +173,20 @@ class SolverHolo():
         for i in range(len(self.distances)):
             prbr = prb.copy()
             psir = psi.copy()
-            # coder = code.copy()
-            if shift_code is not None:    # shift in scaled coordinates
-                coder = self.apply_shift_complex(code, shift_code[i])
-                # print(coder.shape)
-                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
-            if code is not None: # multiple the code and probe                
-                prbr = prbr*coder            
+            # # coder = code.copy()
+            # if shift_code is not None:    # shift in scaled coordinates
+            #     coder = self.apply_shift_complex(code, shift_code[i])
+            #     # print(coder.shape)
+            #     coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+            # if code is not None: # multiple the code and probe                
+            #     prbr = prbr*coder            
             if self.distances2 is not None:  # propagate the probe from plane 0 to plane i
                 prbr = self.fwd_propagate(prbr, self.fP2[i])
-            if shift is not None:    # shift in scaled coordinates
-                psir = self.apply_shift_complex(psir, shift[i])
-            # scale object
+            # if shift is not None:    # shift in scaled coordinates
+            #     psir = self.apply_shift_complex(psir, shift[i])
+            # # scale object
             psir = self.fwd_resample(psir, self.magnification[i]*2)
-            # multiply the probe and object
+            # # multiply the probe and object
             psir *= prbr            
             # propagate both
             psir = self.fwd_propagate(psir, self.fP[i])
