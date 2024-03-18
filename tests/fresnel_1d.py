@@ -19,7 +19,7 @@ norm_magnifications = magnifications/magnifications[0] # normalized magnificatio
 distances = distances*norm_magnifications**2 # scaled propagation distances due to magnified probes
 
 # Assuming the probe is given at the first plane, propagate it to the sample planes
-z1_p = z1[0]  # position of the probe for reconstruction
+z1_p = z1[0]/2  # position of the probe for reconstruction
 z2_p = z1-np.tile(z1_p, len(z1)) # distance between the probe and sample
 magnifications_p = (z1_p+z2_p)/z1_p # magnification when propagating from the probe plane to the detector
 distances_p = (z1_p*z2_p)/(z1_p+z2_p) # propagation distances after switching from the point source wave to plane wave,
@@ -51,6 +51,7 @@ for k in range(len(distances)):
     g[k] = propagate(propagate(f, fP_p[k]),fP[k])
 
 # data after double propagation should be the same for all distances
+print(g)
 print(np.linalg.norm(g-g[0],axis=(1,2))/np.linalg.norm(g[0]))
 
 

@@ -108,7 +108,7 @@ class SolverHolo():
                magnification).astype('float32')
         [xk, yk] = cp.meshgrid(xk, xk)
         fr = cp.zeros([self.ptheta, self.n, self.n], dtype='complex64')
-        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
+        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f,axes=(1,2))),axes=(1,2))
         f = cp.ascontiguousarray(f)
         self.cl_holo.fwd_usfft(fr.data.ptr, f.data.ptr,
                                xk.data.ptr, yk.data.ptr, 0)
@@ -131,7 +131,7 @@ class SolverHolo():
         fr = cp.ascontiguousarray(fr)
         self.cl_holo.adj_usfft(f.data.ptr, fr.data.ptr,
                                xk.data.ptr, yk.data.ptr, 0)
-        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f)))
+        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f,axes=(1,2))),axes=(1,2))
         return f
 
     def fwd_propagate(self, f, fP):
@@ -139,9 +139,9 @@ class SolverHolo():
 
         ff = self.fwd_pad(f)
         # ff=f.copy()
-        ff = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(ff)))
+        ff = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(ff,axes=(1,2))),axes=(1,2))
         ff = ff*fP
-        ff = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(ff)))
+        ff = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(ff,axes=(1,2))),axes=(1,2))
         ff = self.adj_pad(ff)
         return ff
 
@@ -149,9 +149,9 @@ class SolverHolo():
         """Adjoint to Fresnel transform"""
         f = self.fwd_pad(ff)
         # f=ff.copy()
-        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f)))
+        f = cp.fft.fftshift(cp.fft.fft2(cp.fft.fftshift(f,axes=(1,2))),axes=(1,2))
         f = f*cp.conj(fP)
-        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f)))
+        f = cp.fft.fftshift(cp.fft.ifft2(cp.fft.fftshift(f,axes=(1,2))),axes=(1,2))
         f = self.adj_pad(f)
         return f
 
@@ -202,24 +202,28 @@ class SolverHolo():
         for i in range(len(self.distances)):
             psir = data[i].copy()
             prbr = prb.copy()
-            # coder = code.copy()
-            if shift_code is not None:    # shift code
-                coder = self.apply_shift_complex(code, shift_code[i])
-                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+            # # coder = code.copy()
+            # if shift_code is not None:    # shift code
+            #     coder = self.apply_shift_complex(code, shift_code[i])
+            #     coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
                         
-            if code is not None:
-                prbr = prbr*coder                        
+            # if code is not None:
+            #     prbr = prbr*coder                        
             # propagate data back
             psir = self.adj_propagate(psir, self.fP[i])
+            
             if self.distances2 is not None:  # propagate the probe from plane 0 to plane i
                 prbr = self.fwd_propagate(prbr, self.fP2[i])
             # multiply the conj probe and object
             psir *= cp.conj(prbr)
+            
             # scale object
             psir = self.adj_resample(psir, self.magnification[i]*2)
+            
             # psir = cp.pad(psir,((0,0),(self.n//2,self.n//2),(self.n//2,self.n//2)))
             if shift is not None:  # shift object back
                 psir = self.apply_shift_complex(psir, -shift[i])
+            
             psi += psir
         # psi /= len(self.distances)
         return psi
@@ -244,11 +248,11 @@ class SolverHolo():
             if self.distances2 is not None:
                 prbr = self.adj_propagate(prbr, self.fP2[i])
             
-            if shift_code is not None:    # shift code
-                coder = self.apply_shift_complex(code, shift_code[i])                        
-                coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
-            if code is not None:
-                prbr = prbr*cp.conj(coder)                                       
+            # if shift_code is not None:    # shift code
+            #     coder = self.apply_shift_complex(code, shift_code[i])                        
+            #     coder = coder[:,self.n//2:3*self.n//2,self.n//2:3*self.n//2]
+            # if code is not None:
+            #     prbr = prbr*cp.conj(coder)                                       
             prb += cp.sum(prbr,axis=0)
         # prb /= len(self.distances)
         return prb
