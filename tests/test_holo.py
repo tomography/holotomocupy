@@ -6,10 +6,10 @@ import h5py
 if __name__ == "__main__":
     # read object
     n = 192  # object size in each dimension
-    ntheta = 2  # number of angles (rotations)
+    ntheta = 5  # number of angles (rotations)
 
     pn = 192  # tomography chunk size for GPU processing
-    ptheta = 2  # holography chunk size for GPU processing
+    ptheta = 5  # holography chunk size for GPU processing
 
     center = n/2  # rotation axis
     theta = np.linspace(0, np.pi, ntheta).astype('float32')  # projection angles
