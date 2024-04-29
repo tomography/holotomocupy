@@ -62,8 +62,8 @@ class holo(object):
     thisown = property(lambda x: x.this.own(), lambda x, v: x.this.own(v), doc="The membership flag")
     __repr__ = _swig_repr
 
-    def __init__(self, n0, n1, ntheta):
-        _holo.holo_swiginit(self, _holo.new_holo(n0, n1, ntheta))
+    def __init__(self, n0e, n1e, n0, n1, ntheta):
+        _holo.holo_swiginit(self, _holo.new_holo(n0e, n1e, n0, n1, ntheta))
     __swig_destroy__ = _holo.delete_holo
 
     def fwd_usfft(self, g_, f_, x_, y_, stream_):

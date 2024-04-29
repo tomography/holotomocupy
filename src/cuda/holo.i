@@ -10,7 +10,7 @@ class holo
 
 public: 
   %mutable;  
-  holo(size_t n0, size_t n1, size_t ntheta);
+  holo(size_t n0e, size_t n1e, size_t n0, size_t n1, size_t ntheta);  
   ~holo();  
   void fwd_usfft(size_t g_, size_t f_, size_t x_, size_t y_, size_t stream_);
   void adj_usfft(size_t g_, size_t f_, size_t x_, size_t y_,  size_t stream_);

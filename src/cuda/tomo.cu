@@ -8,7 +8,7 @@
 tomo::tomo(size_t ntheta, size_t pnz, size_t n, float center,
                        size_t theta_, size_t ngpus)
     : ntheta(ntheta), pnz(pnz), n(n), center(center), ngpus(ngpus) {
-  float eps = 1e-2;
+  float eps = 1e-3;
   mu = -log(eps) / (2 * n * n);
   m = ceil(2 * n * 1 / PI * sqrt(-mu * log(eps) + (mu * n) * (mu * n) / 4));
   f = new float2*[ngpus];

@@ -56,29 +56,33 @@ if __name__ == "__main__":
     beta0 = dxchange.read_tiff('data/beta-chip-192.tiff')
     delta0 = dxchange.read_tiff('data/delta-chip-192.tiff')
 
+    pad = True
+    ne = 2*n
     # pad with zeros
-    beta = np.zeros([2*n, 2*n, 2*n], dtype='float32')
-    delta = np.zeros([2*n, 2*n, 2*n], dtype='float32')
-    delta[n-96:n+96, n-96:n+96, n-96:n+96] = delta0
-    beta[n-96:n+96, n-96:n+96, n-96:n+96] = beta0
+    beta = np.zeros([ne, ne, ne], dtype='float32')
+    delta = np.zeros([ne, ne, ne], dtype='float32')
+    delta[ne//2-96:ne//2+96, ne//2-96:ne//2+96, ne//2-96:ne//2+96] = delta0
+    beta[ne//2-96:ne//2+96, ne//2-96:ne//2+96, ne//2-96:ne//2+96] = beta0
 
     u = delta+1j*beta
     u = u.astype('complex64')
 
     # load probe from ID16a recovered by NFP for the first distance
-    prb_abs = dxchange.read_tiff(f'data/prb_id16a/prb_abs_{n}.tiff')[0:1]
-    prb_phase = dxchange.read_tiff(f'data/prb_id16a/prb_phase_{n}.tiff')[0:1]
+    prb_abs = dxchange.read_tiff(f'data/prb_id16a/prb_abs_{n}.tiff')[:ndist]
+    prb_phase = dxchange.read_tiff(f'data/prb_id16a/prb_phase_{n}.tiff')[:ndist]    
     prb = prb_abs*np.exp(1j*prb_phase)*0+1
 
+
+
     # compute tomographic projections
-    with holotomo.SolverTomo(theta, ntheta, 2*n, 2*n, 2*pn, 2*center) as tslv:
+    with holotomo.SolverTomo(theta, ntheta, ne, ne, pn*ne//n, center*ne//n) as tslv:
         proj = tslv.fwd_tomo_batch(u)
 
     # shifts of motors between different planes
     shifts = (np.random.random([ndist, ntheta, 2]).astype('float32')-0.5)*10
 
     # propagate projections with holography
-    with holotomo.SolverHolo(ntheta, n, ptheta, voxelsize, energy, distances, norm_magnifications, distances2) as pslv:
+    with holotomo.SolverHolo(ntheta, n, ne, ptheta, voxelsize, energy, distances, norm_magnifications, distances2,pad=pad) as pslv:
         # transmission function
         psi = pslv.exptomo(proj)
 

@@ -91,16 +91,16 @@ void __global__ wrap2d(float2 *f, int n0, int n1, int ntheta, int m0, int m1, bo
   }
 }
 void __global__ gather2d(float2 *g, float2 *f, float *x, float *y, int m0,
-                         int m1, float mu0, float mu1, int n0, int n1, int ntheta, bool direction) {
+                         int m1, float mu0, float mu1, int n0e, int n1e, int ntheta, int n0, int n1,  bool direction) {
   int tx = blockDim.x * blockIdx.x + threadIdx.x;
   int ty = blockDim.y * blockIdx.y + threadIdx.y;
   int tz = blockDim.z * blockIdx.z + threadIdx.z;
 
-  if (tx >= n0/2 || ty >= n1/2 || tz >= ntheta)
+  if (tx >= n0 || ty >= n1 || tz >= ntheta)
     return;
 
-  int g_ind = tx + ty * n0/2 + tz* n0/2 * n1/2;
-  int x_ind = tx + ty * n0/2;
+  int g_ind = tx + ty * n0 + tz* n0 * n1;
+  int x_ind = tx + ty * n0;
 
   float x0 = x[x_ind];
   float y0 = y[x_ind];
@@ -114,15 +114,15 @@ void __global__ gather2d(float2 *g, float2 *f, float *x, float *y, int m0,
     g0.y = g[g_ind].y;
   }
   for (int i1 = 0; i1 < 2 * m1 + 1; i1++) {
-    int ell1 = floorf(2 * n1 * y0) - m1 + i1;
+    int ell1 = floorf(2 * n1e * y0) - m1 + i1;
     for (int i0 = 0; i0 < 2 * m0 + 1; i0++) {
-      int ell0 = floorf(2 * n0 * x0) - m0 + i0;
-      float w0 = ell0 / (float)(2 * n0) - x0;
-      float w1 = ell1 / (float)(2 * n1) - y0;
+      int ell0 = floorf(2 * n0e * x0) - m0 + i0;
+      float w0 = ell0 / (float)(2 * n0e) - x0;
+      float w1 = ell1 / (float)(2 * n1e) - y0;
       float w = PI / sqrtf(mu0 * mu1) *
                 __expf(-PI * PI / mu0 * (w0 * w0) - PI * PI / mu1 * (w1 * w1));
-      int f_ind = n0 + m0 + ell0 + (2 * n0 + 2 * m0) * (n1 + m1 + ell1) +
-                  (2 * n0 + 2 * m0) * (2 * n1 + 2 * m1) * tz;
+      int f_ind = n0e + m0 + ell0 + (2 * n0e + 2 * m0) * (n1e + m1 + ell1) +
+                  (2 * n0e + 2 * m0) * (2 * n1e + 2 * m1) * tz;
       if (direction == 0) {
         g0.x += w * f[f_ind].x;
         g0.y += w * f[f_ind].y;

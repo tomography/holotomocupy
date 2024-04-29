@@ -111,7 +111,7 @@ class SolverTomo(tomo):
             gamma = 0
         return gamma
     
-    def cg_tomo(self, data, init, piter, dbg_step=1):
+    def cg_tomo(self, data, init, piter,gamma0, dbg_step=1):
         """Conjugate gradients method for tomography"""
 
         # minimization functional
@@ -120,7 +120,7 @@ class SolverTomo(tomo):
             return f        
         u = init.copy()
         
-        gamma = 1# init gamma as a large value
+        #gamma = 1# init gamma as a large value
         for i in range(piter):
             u = cp.ascontiguousarray(u)
             fu = self.fwd_tomo(u)            
@@ -136,14 +136,15 @@ class SolverTomo(tomo):
             grad0 = grad
             # line search
             fd = self.fwd_tomo(d)
-            gamma = self.line_search(minf, gamma, u, fu, d, fd)
+            gamma = self.line_search(minf, gamma0, u, fu, d, fd)
             u = u + gamma*d
-            if i%dbg_step==0:
-                print(f'{i}) {gamma=}, err={minf(u,fu)}')
+            # print(gamma)
+            # if i%dbg_step==0:
+                # print(f'{i}) {gamma=}, err={minf(u,fu)}')
         
         return u
 
-    def cg_tomo_batch(self, data, init, piter, dbg_step=1):
+    def cg_tomo_batch(self, data, init, piter,gamma, dbg_step=1):
         """Batch of Holography transforms"""
         res = np.zeros([self.nz, self.n, self.n], dtype='complex64')
         for ids in chunk(range(self.nz), self.pnz):
@@ -151,7 +152,7 @@ class SolverTomo(tomo):
             data_gpu = cp.ascontiguousarray(cp.array(data[:,ids]))
             init_gpu = cp.array(init[ids])
             # Radon transform
-            res_gpu = self.cg_tomo(data_gpu, init_gpu, piter, dbg_step)
+            res_gpu = self.cg_tomo(data_gpu, init_gpu, piter, gamma,dbg_step)
             # copy result to cpu
             res[ids] = res_gpu.get()
         return res

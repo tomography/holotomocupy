@@ -1,0 +1,1 @@
+1. /data/NSLSII/3ID/projection_image/205-230 - big siemens star, huge shifts, wrong shifts, adjusted alignment, some part of recon look good - nfp_probeholo_nslsII.ipynb
