@@ -1,7 +1,8 @@
 import cupy as cp
 from .cuda_kernels import pad_kernel
 from .chunking import gpu_batch
-from .chunking import global_chunk
+
+
 def _fwd_pad(f):
     """Fwd data padding"""
     [ntheta, n] = f.shape[:2]
@@ -20,6 +21,7 @@ def _adj_pad(fpad):
                (32, 32, 1), (fpad, f, n, ntheta, 1))
     return f/2
 
+
 @gpu_batch
 def G(f, wavelength, voxelsize, z):
     """Fresnel transform"""
@@ -27,11 +29,12 @@ def G(f, wavelength, voxelsize, z):
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
     fP = cp.exp(-1j*cp.pi*wavelength*z*(fx**2+fy**2))
-    ff =f.copy()
+    ff = f.copy()
     ff = _fwd_pad(ff)
-    ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)    
+    ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
     ff = _adj_pad(ff)
     return ff
+
 
 @gpu_batch
 def GT(f, wavelength, voxelsize, z):
@@ -39,11 +42,11 @@ def GT(f, wavelength, voxelsize, z):
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
-    fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))    
+    fP = cp.exp(1j*cp.pi*wavelength*z*(fx**2+fy**2))
     ff = f.copy()
     ff = _fwd_pad(ff)
     ff = cp.fft.ifft2(cp.fft.fft2(ff)*fP)
-    ff = _adj_pad(ff)    
+    ff = _adj_pad(ff)
     return ff
 
 
@@ -58,7 +61,6 @@ def GT(f, wavelength, voxelsize, z):
 # aaa = GT(aa, wavelength, voxelsize, z)
 # print(cp.sum(a*cp.conj(aaa)))
 # print(cp.sum(aa*cp.conj(aa)))
-
 
 
 # plt.figure()
