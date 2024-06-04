@@ -225,8 +225,4 @@ prb
 bq
 old_ipynb
 shifts*
-tests/3d_ald/final*
-tests/chip_codes/log/*
-tests/3d_ald_syn_codes/True*
-tests/3d_ald_syn_codes/False*
-same_probe*
+tests/3d_ald_syn/data/*
