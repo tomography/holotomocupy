@@ -209,4 +209,6 @@ dkms.conf
 
 
 .loglogin
-tests/3d_ald_syn/data/*
+tests/3d_ald/data/*
+tests/siemens_star/data/*
+*.png
