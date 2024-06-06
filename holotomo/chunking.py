@@ -1,97 +1,159 @@
 import cupy as cp
 import numpy as np
 
-cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
-# streams for overlapping data transfers with computations
-stream1 = cp.cuda.Stream(non_blocking=False)
-stream2 = cp.cuda.Stream(non_blocking=False)
-stream3 = cp.cuda.Stream(non_blocking=False)
 global_chunk = 16
-
-
-def pinned_array(array):
-    """Allocate pinned memory and associate it with numpy array"""
-
-    mem = cp.cuda.alloc_pinned_memory(array.nbytes)
-    src = np.frombuffer(
-        mem, array.dtype, array.size).reshape(array.shape)
-    src[...] = array
-    return src
 
 
 def gpu_batch(func):
     def inner(*args, **kwargs):
         ntheta = args[0].shape[0]
-        chunk = min(global_chunk, ntheta)  # calculate based on data sizes
+        chunk = min(global_chunk, ntheta)  
         nchunk = int(np.ceil(ntheta/chunk))
+
+        # if array is on gpu then just run the function
         if isinstance(args[0], cp.ndarray):
             out = func(*args, **kwargs)
             return out
-
+        
+        #else do processing by chunks
         inp_gpu = []
-        inp_pinned = []
-        out_gpu = []
-        out_pinned = []
         out = []
 
+        # determine the number o inputs
         ninp = 0
         for k in range(0, len(args)):
             if isinstance(args[k], np.ndarray) and args[k].shape[0] == ntheta:
                 inp_gpu.append(
-                    cp.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype))
-                inp_pinned.append(pinned_array(
-                    np.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype)))
+                    cp.empty([chunk, *args[k].shape[1:]], dtype=args[k].dtype))
                 ninp += 1
             else:
                 break
-        for k in range(nchunk+2):
-            if (k > 0 and k < nchunk+1):
-                with stream2:
-                    st, end = (k-1)*chunk, min(ntheta, k*chunk)
-                    inp_gpu0 = [a[(k-1) % 2] for a in inp_gpu]
-                    tmp = func(*inp_gpu0, *args[ninp:], **kwargs)
-                    if not isinstance(tmp, list):
-                        tmp = [tmp]
-                    if k == 1:  # first time we know the out shape
-                        nout = len(tmp)
-                        for j in range(nout):
-                            out_gpu.append(
-                                cp.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
-                            out_pinned.append(pinned_array(
-                                np.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype)))
-                            out.append(
-                                np.empty([ntheta, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
-                    for j in range(nout):
-                        out_gpu[j][(k-1) % 2] = tmp[j]
-            if (k > 1):
-                with stream3:  # gpu->cpu copy
-                    for j in range(nout):
-                        out_gpu[j][(k-2) % 2].get(out=out_pinned[j]
-                                                  [(k-2) % 2])  # contiguous copy, fast
+        
+        # run by chunks
+        for k in range(nchunk):
+            st, end = k*chunk, min(ntheta, (k+1)*chunk)
+            s = end-st
 
-            if (k < nchunk):
-                with stream1:  # cpu->gpu copy
-                    st, end = k*chunk, min(ntheta, (k+1)*chunk)
-                    s = end-st
-                    for j in range(ninp):
-                        inp_pinned[j][k % 2, :s] = args[j][st:end]
-                        # contiguous copy, fast
-                        inp_gpu[j][k % 2].set(inp_pinned[j][k % 2])
+            # copy to gpu
+            for j in range(ninp):
+                inp_gpu[j][:s].set(args[j][st:end])
+            inp_gpu0 = [a for a in inp_gpu]
+            
+            #run function
+            out_gpu = func(*inp_gpu0, *args[ninp:], **kwargs)
 
-            stream3.synchronize()
-            if (k > 1):
-                st, end = (k-2)*chunk, min(ntheta, (k-1)*chunk)
-                s = end-st
+            if not isinstance(out_gpu, list):
+                out_gpu = [out_gpu]
+            
+            if k == 0:  # first time we know the out shape
+                nout = len(out_gpu)
                 for j in range(nout):
-                    out[j][st:end] = out_pinned[j][(k-2) % 2, :s]
-
-            stream1.synchronize()
-            stream2.synchronize()
-            stream3.synchronize()
+                    out.append(
+                        np.empty([ntheta, *out_gpu[j].shape[1:]], dtype=out_gpu[j].dtype))                                
+            
+            # copy from gpu            
+            for j in range(nout):
+                out_gpu[j][:s].get(out=out[j][st:end])  # contiguous copy, fast
+                    
         if nout == 1:
             out = out[0]
         return out
     return inner
+
+
+#####TO TRY WITh PINNED MEMORY
+
+#cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
+# streams for overlapping data transfers with computations
+# stream1 = cp.cuda.Stream(non_blocking=False)
+# stream2 = cp.cuda.Stream(non_blocking=False)
+# stream3 = cp.cuda.Stream(non_blocking=False)
+
+# def pinned_array(array):
+#     """Allocate pinned memory and associate it with numpy array"""
+
+#     mem = cp.cuda.alloc_pinned_memory(array.nbytes)
+#     src = np.frombuffer(
+#         mem, array.dtype, array.size).reshape(array.shape)
+#     src[...] = array
+#     return src
+
+
+# def gpu_batch(func):
+#     #cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
+
+#     def inner(*args, **kwargs):
+#         ntheta = args[0].shape[0]
+#         chunk = min(global_chunk, ntheta)  # calculate based on data sizes
+#         nchunk = int(np.ceil(ntheta/chunk))
+#         if isinstance(args[0], cp.ndarray):
+#             out = func(*args, **kwargs)
+#             return out
+
+#         inp_gpu = []
+#         out_gpu = []
+#         out = []
+
+#         ninp = 0
+#         for k in range(0, len(args)):
+#             if isinstance(args[k], np.ndarray) and args[k].shape[0] == ntheta:
+#                 inp_gpu.append(
+#                     cp.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype))
+#                 ninp += 1
+#             else:
+#                 break
+#         for k in range(nchunk+2):
+#             if (k > 0 and k < nchunk+1):
+#                 with stream2:
+#                     st, end = (k-1)*chunk, min(ntheta, k*chunk)
+#                     inp_gpu0 = [a[(k-1) % 2] for a in inp_gpu]
+#                     tmp = func(*inp_gpu0, *args[ninp:], **kwargs)
+#                     if not isinstance(tmp, list):
+#                         tmp = [tmp]
+#                     if k == 1:  # first time we know the out shape
+#                         nout = len(tmp)
+#                         for j in range(nout):
+#                             out_gpu.append(
+#                                 cp.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
+#                             out.append(
+#                                 np.empty([ntheta, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
+#                     for j in range(nout):
+#                         out_gpu[j][(k-1) % 2] = tmp[j]
+#             if (k > 1):
+#                 with stream3:  # gpu->cpu copy
+#                     for j in range(nout):
+#                         # out_gpu[j][(k-2) % 2].get(out=out_pinned[j]
+#                         #                           [(k-2) % 2])  # contiguous copy, fast
+#                         st, end = (k-2)*chunk, min(ntheta, (k-1)*chunk)
+#                         s = end-st
+#                         out_gpu[j][(k-2) % 2,:s].get(out=out[j][st:end])  # contiguous copy, fast
+
+#             if (k < nchunk):
+#                 with stream1:  # cpu->gpu copy
+#                     st, end = k*chunk, min(ntheta, (k+1)*chunk)
+#                     s = end-st
+#                     for j in range(ninp):
+#                         # inp_pinned[j][k % 2, :s] = args[j][st:end]
+#                         # # contiguous copy, fast
+#                         # inp_gpu[j][k % 2].set(inp_pinned[j][k % 2])
+#                         #inp_pinned[j][k % 2, :s] = args[j][st:end]
+#                         # contiguous copy, fast
+#                         inp_gpu[j][k % 2,:s].set(args[j][st:end])
+
+#             # stream3.synchronize()
+#             # if (k > 1):
+#             #     st, end = (k-2)*chunk, min(ntheta, (k-1)*chunk)
+#             #     s = end-st
+#             #     for j in range(nout):
+#             #         out[j][st:end] = out_pinned[j][(k-2) % 2, :s]
+
+#             stream1.synchronize()
+#             stream2.synchronize()
+#             stream3.synchronize()
+#         if nout == 1:
+#             out = out[0]
+#         return out
+#     return inner
 
 
 # @gpu_batch(8)
