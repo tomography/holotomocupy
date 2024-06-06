@@ -348,7 +348,7 @@ def cg_holo(data, ref, init, init_prb,  pars):
     def _minf(fpsi,data):
         res = cp.empty(data.shape[0],dtype='float32')
         for k in range(data.shape[0]):
-            res[k] = np.linalg.norm(cp.abs(fpsi[k])-data[k])
+            res[k] = np.linalg.norm(cp.abs(fpsi[k])-data[k])**2
         return res
     
     def minf(fpsi,fprb):
