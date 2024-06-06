@@ -57,7 +57,7 @@ def R(obj, theta, rotation_axis):
     w = cp.exp(-2*cp.pi*1j*t*(rotation_axis + n/2))
     sino = cp.fft.ifft(w*cp.fft.fft(sino))
     # normalization for the unity test
-    sino /= cp.float32(4*np.sqrt(ntheta*n)*n)
+    sino /= cp.float32(4*n)    
     return sino
 
 
@@ -90,7 +90,7 @@ def RT(sino, theta, rotation_axis):
 
     # STEP4: unpadding, multiplication by phi
     fde = fde[:, n//2:3*n//2, n//2:3*n//2]*phi
-    fde /= cp.float32(np.sqrt(ntheta*n)*n)  # normalization for the unity test
+    fde /= cp.float32(n)  # normalization for the unity test
     return fde
 
 # import matplotlib.pyplot as plt
