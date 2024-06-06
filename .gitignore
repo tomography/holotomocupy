@@ -209,6 +209,10 @@ dkms.conf
 
 
 .loglogin
-tests/3d_ald/data/*
+examples_synthetic/3d_ald/data/*
+examples_synthetic/siemens_star/data/*
+examples_experimental/siemens_star/data/*
 tests/siemens_star/data/*
 *.png
+
+report*
