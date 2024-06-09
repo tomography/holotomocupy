@@ -1,11 +1,11 @@
-# holotomo
+# holotomocupy
 Holotomographic reconstruction on GPU
 
 
 ## 1. create conda environment and install dependencies
 
 ```console
-conda create -n holotomo -c conda-forge cupy swig cmake scikit-build dxchange xraylib matplotlib jupyter astropy olefile ninja
+conda create -n holotomocupy -c conda-forge cupy swig cmake scikit-build dxchange xraylib matplotlib jupyter astropy olefile ninja
 ```
 
 Note: CUDA drivers need to be installed before installation
