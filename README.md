@@ -17,7 +17,9 @@ This software package presents a family of novel algorithms, encapsulated in an 
 
 * Pipeline GPU data processing with CUDA streams within cuPy allows significantly reduced time for some CPU-GPU memory transfers.
 
-* Demonstrated for: 1. Holotomography reconstruction with illumination retrieval, 2. Holotomography reconstruction with coded apertures
+* Demonstrated for:
+    1. Holotomography reconstruction with illumination retrieval,
+    2. Holotomography reconstruction with coded apertures.
 
 
 
