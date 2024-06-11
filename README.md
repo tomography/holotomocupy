@@ -43,18 +43,18 @@ pip install .
 
 *examples_synthetic/siemens_star/modeling.ipynb* - generate data for a siemens star
 
-*examples_synthetic/siemens_star/rec_1step.ipynb - phase retreival by a 1-step method (CTF, MultiPaganin)
+*examples_synthetic/siemens_star/rec_1step.ipynb* - phase retreival by a 1-step method (CTF, MultiPaganin)
 
-*examples_synthetic/siemens_star/rec_iterative.ipynb - iterative reconstruction with illumination retrieval
+*examples_synthetic/siemens_star/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
 
 
 ### 3d_ald
 
 *examples_synthetic/3d_ald/modeling.ipynb* - generate data for a 3D ALD synthetic sample 
 
-*examples_synthetic/3d_ald/rec_1step.ipynb - phase retreival by a 1-step method (CTF, MultiPaganin)
+*examples_synthetic/3d_ald/rec_1step.ipynb* - phase retreival by a 1-step method (CTF, MultiPaganin)
 
-*examples_synthetic/3d_ald/rec_iterative.ipynb - iterative reconstruction with illumination retrieval
+*examples_synthetic/3d_ald/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
 
 
 *3d_ald_syn/rec.ipynb* - reconstruction of the 3D ALD sample with probe retrieval
