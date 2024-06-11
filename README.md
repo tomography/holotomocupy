@@ -7,17 +7,17 @@ This software package presents a family of novel algorithms, encapsulated in an 
 
 ## Key features
 
-### Based on Python, GPU acceleration with cuPy (GPU-accelerated numPy). Easy to install with pip, no C/C++ or NVCC compilers needed. 
+** Based on Python, GPU acceleration with cuPy (GPU-accelerated numPy). Easy to install with pip, no C/C++ or NVCC compilers needed. 
 
-### Regular operators (tomographic projection, Fresnel propagator, scaling, shifts, etc.) and processing methods are implemented and can be reused.
+** Regular operators (tomographic projection, Fresnel propagator, scaling, shifts, etc.) and processing methods are implemented and can be reused.
 
-### Jupyter notebooks give examples of full pipelines for synthetic/experimental data reconstruction.
+** Jupyter notebooks give examples of full pipelines for synthetic/experimental data reconstruction.
 
-### New operators/processing methods can be added by users. Implemented Python decorator @gpu_batch splits data into chunks if data do not fit into GPU memory.
+** New operators/processing methods can be added by users. Implemented Python decorator @gpu_batch splits data into chunks if data do not fit into GPU memory.
 
-### Pipeline GPU data processing with CUDA streams within cuPy allows significantly reduced time for some CPU-GPU memory transfers.
+** Pipeline GPU data processing with CUDA streams within cuPy allows significantly reduced time for some CPU-GPU memory transfers.
 
-### Demonstrated for: 1. Holotomography reconstruction with illumination retrieval, 2. Holotomography reconstruction with coded apertures
+** Demonstrated for: 1. Holotomography reconstruction with illumination retrieval, 2. Holotomography reconstruction with coded apertures
 
 
 
