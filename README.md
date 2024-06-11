@@ -37,7 +37,7 @@ cd holotomocupy
 pip install .
 ```
 
-## Jupyter notebook for synthetic data reconstruction
+## 1. Jupyter notebook for synthetic data reconstruction
 
 ### 2d Siemens star 
 
@@ -60,7 +60,7 @@ pip install .
 *3d_ald_syn/rec.ipynb* - reconstruction of the 3D ALD sample with probe retrieval
 
 
-## Jupyter notebook for experimental data reconstruction
+## 2. Jupyter notebook for experimental data reconstruction
 
 ### 2D Siemens star
 
@@ -68,7 +68,7 @@ pip install .
 
 *examples_experimental/siemens_star/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
 
-## Holotomography with coded apertures
+## 3. Jupyter notebook for holotomography reconstruction with coded apertures
 
 ### Synthetic 2D Siemens star 
 
