@@ -1,84 +1,87 @@
-# holotomocupy
-Holotomographic reconstruction on GPU
+# HolotomocuPy
+## Overview
+
+Holotomography is a coherent imaging technique that provides three-dimensional reconstruction of a sample’s complex refractive index by integrating holography principles with tomographic methods. This approach is particularly suitable for micro- and nano-tomography instruments at the latest generation of synchrotron sources.
+
+This software package presents a family of novel algorithms, encapsulated in an efficient implementation for X-ray holotomography reconstruction. 
+
+## Key features
+
+* Based on Python, GPU acceleration with cuPy (GPU-accelerated numPy). Easy to install with pip, no C/C++ or NVCC compilers needed. 
+
+* Regular operators (tomographic projection, Fresnel propagator, scaling, shifts, etc.) and processing methods are implemented and can be reused.
+
+* Jupyter notebooks give examples of full pipelines for synthetic/experimental data reconstruction.
+
+* New operators/processing methods can be added by users. Implemented Python decorator @gpu_batch splits data into chunks if data do not fit into GPU memory.
+
+* Pipeline GPU data processing with CUDA streams within cuPy allows significantly reduced time for some CPU-GPU memory transfers.
+
+* Demonstrated for:
+    1. Holotomography reconstruction with illumination retrieval.
+    2. Holotomography reconstruction with coded apertures.
 
 
-## 1. create conda environment and install dependencies
+
+## Installation
 
 ```console
-conda create -n holotomocupy -c conda-forge cupy swig cmake scikit-build dxchange xraylib matplotlib jupyter astropy olefile ninja
+conda create -n holotomocupy -c conda-forge cupy dxchange xraylib matplotlib jupyter astropy olefile
 ```
 
-Note: CUDA drivers need to be installed before installation
-
-## 3. Export the appropriate CUDA configuration
-
-export CUDACXX=/local/cuda-11.7/bin/nvcc
-
-## 3. clone the package and install it
-
 ```console
-git clone https://github.com/nikitinvv/holotomo
+git clone https://github.com/nikitinvv/holotomocupy
 
-cd holotomo
+cd holotomocupy
 
 pip install .
 ```
 
-## 4. check adjoint tests
+## 1. Jupyter notebook for synthetic data reconstruction
 
-```console
-cd tests
+### 2d Siemens star 
 
-```
+*examples_synthetic/siemens_star/modeling.ipynb* - generate data for a siemens star
 
-Adjoint test holography. Checking the equity: <G*Gf,f> ?= <Gf,Gf>
+*examples_synthetic/siemens_star/rec_1step.ipynb* - phase retreival by a 1-step method (CTF, MultiPaganin)
 
-```console
-python test_holo.py
-
-```
-
-Adjoint test tomography. Checking the equity: <R*Rf,f> ?= <Rf,Rf> 
-
-```console
-python test_tomo.py
-
-```
-
-## 5. See jupyter notebook for examples of reconstructions
-
-*data_modeling_chip.ipynb* - generate data for a chip 
-
-*iterative_reconsturction_chip.ipynb* - reconstruct chip data with the Conjugate Gradients method
-
-*onestep_reconsturction_chip.ipynb* - reconstruct chip data with multiPganain, CTF and methods
-
-*data_modeling_phantom.ipynb* - generate holotomography phantom (set of ellipses) data 
-
-*onestep_reconsturction_phantom.ipynb* - reconstruct phantom data with multiPganain, CTF and methods
-
-For modeling parallel the beam geometry one can set magnifications[:] = 1.
-Modeling without flat fields can be done by setting prb[:] = 1
-
-*probe_tests.ipynb* - propagation tests for the probes recovered by the NFP
-
-*data_modeling_siemens_codes.ipynb* - data modeling with structure illumination
-
-*iterative_reconstruction_siemens_codes.ipynb* - reconstruction with structure illumination
+*examples_synthetic/siemens_star/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
 
 
-### *DTU installation and run jupyter notebook
+### 3d_ald
 
-Connect to a GPU node with X forwarding and load cuda module
+*examples_synthetic/3d_ald/modeling.ipynb* - generate data for a 3D ALD synthetic sample 
 
-```console
+*examples_synthetic/3d_ald/rec_1step.ipynb* - phase retreival by a 1-step method (CTF, MultiPaganin)
 
-voltash -X
+*examples_synthetic/3d_ald/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
 
-module add cuda/12.2
 
-```
+*3d_ald_syn/rec.ipynb* - reconstruction of the 3D ALD sample with probe retrieval
 
-then follow instruction above.
+
+## 2. Jupyter notebook for experimental data reconstruction
+
+### 2D Siemens star
+
+*examples_experimental/siemens_star/rec_1step.ipynb* - phase retreival by a 1-step method (CTF, MultiPaganin)
+
+*examples_experimental/siemens_star/rec_iterative.ipynb* - iterative reconstruction with illumination retrieval
+
+## 3. Jupyter notebook for holotomography reconstruction with coded apertures
+
+### Synthetic 2D Siemens star 
+
+*coded_apertures/siemens_star/modeling.ipynb* - generate data for a siemens star with coded apertures
+
+*coded_apertures/siemens_star/rec_iterative.ipynb* - reconstruction with an iterative scheme
+
+### Synthetic 3D ALD
+
+*coded_apertures/3d_ald/modeling.ipynb* - generate data for a 3d ALD sample star with coded apertures
+
+*coded_apertures/3d_ald/rec_reprojection.ipynb* - joint phase retrieval and tomography reconstruction using the reprojection method
+
+
 
 

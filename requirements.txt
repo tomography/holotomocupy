@@ -1,0 +1,7 @@
+cupy
+dxchange
+xraylib 
+matplotlib 
+jupyter 
+astropy 
+olefile
