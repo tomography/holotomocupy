@@ -1,4 +1,4 @@
-# holotomocupy
+# HolotomocuPy
 ## Overview
 
 Holotomography is a coherent imaging technique that provides three-dimensional reconstruction of a sample’s complex refractive index by integrating holography principles with tomographic methods. This approach is particularly suitable for micro- and nano-tomography instruments at the latest generation of synchrotron sources.
