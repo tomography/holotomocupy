@@ -5,8 +5,22 @@ from .chunking import gpu_batch
 
 
 @gpu_batch
-def S(psi, shift=None):
-    """Shift operator"""
+def S(psi, shift=0):
+    """ 2D shift operator
+    
+    Parameters
+    ----------
+    psi : ndarray
+        Input 3D array, shape [ntheta,n,n] 
+    shift : ndarray
+        x,y shifts of each 2D array, shape [ntheta,2]
+    
+    Returns
+    -------
+    res : ndarray
+         Shifted array
+    
+    """
     res = psi.copy()
     if np.all(shift == 0):
         return res
@@ -22,8 +36,22 @@ def S(psi, shift=None):
 
 
 @gpu_batch
-def ST(psi, shift=None):
-    """Shift operator"""
+def ST(psi, shift=0):
+    """ Adjoint 2D shift operator (-shift)
+    
+    Parameters
+    ----------
+    psi : ndarray
+        Input 3D array, shape [ntheta,n,n] 
+    shift : ndarray
+        x,y shifts of each 2D array, shape [ntheta,2]
+    
+    Returns
+    -------
+    res : ndarray
+         Shifted array
+    
+    """
     res = psi.copy()
     if np.all(shift == 0):
         return res
@@ -37,22 +65,6 @@ def ST(psi, shift=None):
     res = res[:, n//2:-n//2, n//2:-n//2]
     return res
 
-
-def _upsampled_dft(data, ups,
-                   upsample_factor=1, axis_offsets=None):
-
-    im2pi = 1j * 2 * np.pi
-    tdata = data.copy()
-    kernel = (cp.tile(cp.arange(ups), (data.shape[0], 1))-axis_offsets[:, 1:2])[
-        :, :, None]*cp.fft.fftfreq(data.shape[2], upsample_factor)
-    kernel = cp.exp(-im2pi * kernel)
-    tdata = cp.einsum('ijk,ipk->ijp', kernel, tdata)
-    kernel = (cp.tile(cp.arange(ups), (data.shape[0], 1))-axis_offsets[:, 0:1])[
-        :, :, None]*cp.fft.fftfreq(data.shape[1], upsample_factor)
-    kernel = cp.exp(-im2pi * kernel)
-    rec = cp.einsum('ijk,ipk->ijp', kernel, tdata)
-
-    return rec
 
 # @gpu_batch
 # def S(psi, shift=0):
@@ -76,10 +88,53 @@ def _upsampled_dft(data, ups,
 #         res[k] = ndimage.shift(res[k], p[k], order=2, mode='nearest', prefilter=True)
 #     return res
 
+def _upsampled_dft(data, ups,
+                   upsample_factor=1, axis_offsets=None):
+
+    im2pi = 1j * 2 * np.pi
+    tdata = data.copy()
+    kernel = (cp.tile(cp.arange(ups), (data.shape[0], 1))-axis_offsets[:, 1:2])[
+        :, :, None]*cp.fft.fftfreq(data.shape[2], upsample_factor)
+    kernel = cp.exp(-im2pi * kernel)
+    tdata = cp.einsum('ijk,ipk->ijp', kernel, tdata)
+    kernel = (cp.tile(cp.arange(ups), (data.shape[0], 1))-axis_offsets[:, 0:1])[
+        :, :, None]*cp.fft.fftfreq(data.shape[1], upsample_factor)
+    kernel = cp.exp(-im2pi * kernel)
+    rec = cp.einsum('ijk,ipk->ijp', kernel, tdata)
+
+    return rec
 
 @gpu_batch
 def registration_shift(src_image, target_image, upsample_factor=1, space="real"):
+    """Efficient subpixel image translation registration by cross-correlation.
 
+    Parameters
+    ----------
+    src_image : ndarray
+        Image to register
+    target_image : ndarray
+        Reference image.
+    upsample_factor : int, optional
+        Upsampling factor. Images will be registered to within
+        ``1 / upsample_factor`` of a pixel. For example
+        ``upsample_factor == 20`` means the images will be registered
+        within 1/20th of a pixel. Default is 1 (no upsampling).
+        Not used if any of ``reference_mask`` or ``moving_mask`` is not None.
+    space : string, one of "real" or "fourier", optional
+        Defines how the algorithm interprets input data. "real" means
+        data will be FFT'd to compute the correlation, while "fourier"
+        data will bypass FFT of input data. Case insensitive. Not
+        used if any of ``reference_mask`` or ``moving_mask`` is not
+        None.
+    
+    Returns
+    -------
+    shift : ndarray
+        Shift vector (in pixels) required to register ``moving_image``
+        with ``reference_image``. Axis ordering is consistent with
+        the axis order of the input array.
+    """
+    
     # assume complex data is already in Fourier space
     if space.lower() == 'fourier':
         src_freq = src_image

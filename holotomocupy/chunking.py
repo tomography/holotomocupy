@@ -5,10 +5,33 @@ global_chunk = 16
 
 
 def gpu_batch(func):
+    """
+    Decorator for processing data by chunks on GPU
+    
+    Parameters
+    ----------
+    func : function for processing on GPU. The function should have syntax:
+    [out1,out2,...] = func(in1, in2,.., par1,par2..), where 
+    arrays in1,in2,.., out1,out2,.. have the same shape in the first dimension 
+    treated as the dimension for chunking data processing on GPU. The func() should 
+    perform processing on cupy arrays and return the result as a list of ndarray 
+    or 1 ndarray.
+    
+    Example:
+    nn=180
+    a = np.zeros([nn,5,3])
+    b = np.zeros([nn,5,3,2])
+    
+    def func(in1,in2,par):
+        out1 = in1+in2[:,0]*par
+        out2 = in1+in2[:,1]*par
+        return [out1,out2]
+    """
+    
     def inner(*args, **kwargs):
-        ntheta = args[0].shape[0]
-        chunk = min(global_chunk, ntheta)  
-        nchunk = int(np.ceil(ntheta/chunk))
+        nn = args[0].shape[0]
+        chunk = min(global_chunk, nn)  
+        nchunk = int(np.ceil(nn/chunk))
 
         # if array is on gpu then just run the function
         if isinstance(args[0], cp.ndarray):
@@ -22,7 +45,7 @@ def gpu_batch(func):
         # determine the number o inputs
         ninp = 0
         for k in range(0, len(args)):
-            if isinstance(args[k], np.ndarray) and args[k].shape[0] == ntheta:
+            if (isinstance(args[k], np.ndarray) or isinstance(args[k], cp.ndarray)) and args[k].shape[0] == nn:
                 inp_gpu.append(
                     cp.empty([chunk, *args[k].shape[1:]], dtype=args[k].dtype))
                 ninp += 1
@@ -31,7 +54,7 @@ def gpu_batch(func):
         
         # run by chunks
         for k in range(nchunk):
-            st, end = k*chunk, min(ntheta, (k+1)*chunk)
+            st, end = k*chunk, min(nn, (k+1)*chunk)
             s = end-st
 
             # copy to gpu
@@ -49,7 +72,7 @@ def gpu_batch(func):
                 nout = len(out_gpu)
                 for j in range(nout):
                     out.append(
-                        np.empty([ntheta, *out_gpu[j].shape[1:]], dtype=out_gpu[j].dtype))                                
+                        np.empty([nn, *out_gpu[j].shape[1:]], dtype=out_gpu[j].dtype))                                
             
             # copy from gpu            
             for j in range(nout):
@@ -59,6 +82,8 @@ def gpu_batch(func):
             out = out[0]
         return out
     return inner
+
+
 
 
 #####TO TRY WITh PINNED MEMORY
@@ -83,9 +108,9 @@ def gpu_batch(func):
 #     #cp.cuda.set_pinned_memory_allocator(cp.cuda.PinnedMemoryPool().malloc)
 
 #     def inner(*args, **kwargs):
-#         ntheta = args[0].shape[0]
-#         chunk = min(global_chunk, ntheta)  # calculate based on data sizes
-#         nchunk = int(np.ceil(ntheta/chunk))
+#         nn = args[0].shape[0]
+#         chunk = min(global_chunk, nn)  # calculate based on data sizes
+#         nchunk = int(np.ceil(nn/chunk))
 #         if isinstance(args[0], cp.ndarray):
 #             out = func(*args, **kwargs)
 #             return out
@@ -96,7 +121,7 @@ def gpu_batch(func):
 
 #         ninp = 0
 #         for k in range(0, len(args)):
-#             if isinstance(args[k], np.ndarray) and args[k].shape[0] == ntheta:
+#             if isinstance(args[k], np.ndarray) and args[k].shape[0] == nn:
 #                 inp_gpu.append(
 #                     cp.empty([2, chunk, *args[k].shape[1:]], dtype=args[k].dtype))
 #                 ninp += 1
@@ -105,7 +130,7 @@ def gpu_batch(func):
 #         for k in range(nchunk+2):
 #             if (k > 0 and k < nchunk+1):
 #                 with stream2:
-#                     st, end = (k-1)*chunk, min(ntheta, k*chunk)
+#                     st, end = (k-1)*chunk, min(nn, k*chunk)
 #                     inp_gpu0 = [a[(k-1) % 2] for a in inp_gpu]
 #                     tmp = func(*inp_gpu0, *args[ninp:], **kwargs)
 #                     if not isinstance(tmp, list):
@@ -116,7 +141,7 @@ def gpu_batch(func):
 #                             out_gpu.append(
 #                                 cp.empty([2, chunk, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
 #                             out.append(
-#                                 np.empty([ntheta, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
+#                                 np.empty([nn, *tmp[j].shape[1:]], dtype=tmp[j].dtype))
 #                     for j in range(nout):
 #                         out_gpu[j][(k-1) % 2] = tmp[j]
 #             if (k > 1):
@@ -124,13 +149,13 @@ def gpu_batch(func):
 #                     for j in range(nout):
 #                         # out_gpu[j][(k-2) % 2].get(out=out_pinned[j]
 #                         #                           [(k-2) % 2])  # contiguous copy, fast
-#                         st, end = (k-2)*chunk, min(ntheta, (k-1)*chunk)
+#                         st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
 #                         s = end-st
 #                         out_gpu[j][(k-2) % 2,:s].get(out=out[j][st:end])  # contiguous copy, fast
 
 #             if (k < nchunk):
 #                 with stream1:  # cpu->gpu copy
-#                     st, end = k*chunk, min(ntheta, (k+1)*chunk)
+#                     st, end = k*chunk, min(nn, (k+1)*chunk)
 #                     s = end-st
 #                     for j in range(ninp):
 #                         # inp_pinned[j][k % 2, :s] = args[j][st:end]
@@ -142,7 +167,7 @@ def gpu_batch(func):
 
 #             # stream3.synchronize()
 #             # if (k > 1):
-#             #     st, end = (k-2)*chunk, min(ntheta, (k-1)*chunk)
+#             #     st, end = (k-2)*chunk, min(nn, (k-1)*chunk)
 #             #     s = end-st
 #             #     for j in range(nout):
 #             #         out[j][st:end] = out_pinned[j][(k-2) % 2, :s]

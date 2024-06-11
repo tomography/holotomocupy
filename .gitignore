@@ -213,7 +213,7 @@ examples_synthetic/3d_ald/data/*
 examples_synthetic/siemens_star/data/*
 examples_experimental/siemens_star/data/*
 coded_apertures/siemens_star/data/*
-tests/siemens_star/data/*
+coded_apertures/3d_ald/data/*
 *.png
 
 report*

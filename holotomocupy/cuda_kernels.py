@@ -1,5 +1,8 @@
 import cupy as cp
 
+"""
+CUDA kernels called from cuPy
+"""
 pad_kernel = cp.RawKernel(r'''                              
 extern "C" void __global__ pad(float2* g, float2 *f, int n, int ntheta, bool direction)
 {

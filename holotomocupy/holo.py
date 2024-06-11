@@ -24,7 +24,25 @@ def _adj_pad(fpad):
 
 @gpu_batch
 def G(f, wavelength, voxelsize, z):
-    """Fresnel transform"""
+    """Fresnel transform
+
+    Parameters
+    ----------
+    f : ndarray
+        Input 3D array to perform the Fresnel transform wrt the last two dimensions
+    wavelength : float
+        Wave length in m
+    voxelsize : float
+        Voxel size in m
+    z : float
+        Propagation distance in m
+    
+    Returns
+    -------
+    ff : ndarray
+        Propagated function
+    """
+    
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)
@@ -38,7 +56,25 @@ def G(f, wavelength, voxelsize, z):
 
 @gpu_batch
 def GT(f, wavelength, voxelsize, z):
-    """Adj Fresnel transform"""
+    """Adjoint Fresnel transform (propagation with -z distance)
+
+    Parameters
+    ----------
+    f : ndarray
+        Input 3D array to perform the Fresnel transform wrt the last two dimensions
+    wavelength : float
+        Wave length in m
+    voxelsize : float
+        Voxel size in m
+    z : float
+        Propagation distance in m
+    
+    Returns
+    -------
+    ff : ndarray
+        Propagated function
+    """
+    
     n = f.shape[-1]
     fx = cp.fft.fftfreq(2*n, d=voxelsize).astype('float32')
     [fx, fy] = cp.meshgrid(fx, fx)

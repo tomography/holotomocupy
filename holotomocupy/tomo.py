@@ -28,6 +28,22 @@ def _init(nz, n):
 
 @gpu_batch
 def R(obj, theta, rotation_axis):
+    """Radon transform for tomography projection
+    Parameters
+    ----------
+    obj : ndarray
+        Input 3D object, shape [nz,n,n]    
+    theta : ndarray
+        Projection angles, shape [ntheta]    
+    rotation_axis : float
+        Rotation axis 
+
+    Returns
+    -------
+    sino : ndarray
+        Output sinograms, shape [nz,ntheta,n]    
+    """
+    
     [nz, n, n] = obj.shape
     theta = cp.array(theta, dtype='float32')
     ntheta = len(theta)
@@ -63,6 +79,22 @@ def R(obj, theta, rotation_axis):
 
 @gpu_batch
 def RT(sino, theta, rotation_axis):
+    """Radon transform for tomography projection
+    Parameters
+    ----------
+    obj : ndarray
+        Input sinograms, shape [nz,ntheta,n]    
+    theta : ndarray
+        Projection angles, shape [ntheta]    
+    rotation_axis : float
+        Rotation axis 
+
+    Returns
+    -------
+    obj : ndarray
+        Output 3D object, shape [nz,n,n]
+    """
+    
     [nz, ntheta, n] = sino.shape
     theta = cp.array(theta, dtype='float32')
 

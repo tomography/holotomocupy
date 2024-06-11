@@ -27,7 +27,22 @@ def _init(ne):
 
 @gpu_batch
 def M(f, magnification=1, n=None):
-    """Data magnification via switching to the Fourier domain"""
+    """Data magnification via switching to the Fourier domain.
+
+    Parameters
+    ----------
+    f : ndarray
+        Input 3D array to perform magnification wrt the last two dimensions
+    magnification: float
+        Magnification factor (<2)
+    n : float
+        Dimension of the last two access of the output ([.,n,n])
+    
+    Returns
+    -------
+    res : ndarray
+        Magnified array
+    """
 
     [ntheta, ne] = f.shape[:2]
     if n == None:
@@ -58,7 +73,22 @@ def M(f, magnification=1, n=None):
 
 @gpu_batch
 def MT(f, magnification=1, ne=None):
-    """Adjoint data magnification via switching to the Fourier domain"""
+    """Data demagnification via switching to the Fourier domain.
+
+    Parameters
+    ----------
+    f : ndarray
+        Input 3D array to perform magnification wrt the last two dimensions
+    magnification: float
+        Demagnification factor (<2)
+    ne : float
+        Dimension of the last two access of the output ([.,ne,ne])
+    
+    Returns
+    -------
+    res : ndarray
+        Magnified array
+    """
 
     [ntheta, n] = f.shape[:2]
     if ne == None:
