@@ -5,7 +5,7 @@ Holotomography is a coherent imaging technique that provides three-dimensional r
 
 This software package presents a family of novel algorithms, encapsulated in an efficient implementation for X-ray holotomography reconstruction. 
 
-##Key features
+## Key features
 
 ### Based on Python, GPU acceleration with cuPy (GPU-accelerated numPy). Easy to install with pip, no C/C++ or NVCC compilers needed. 
 
