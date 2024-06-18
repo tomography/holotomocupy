@@ -317,10 +317,14 @@ texinfo_documents = [
 # http://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html#confval-autodoc_mock_imports
 
 autodoc_mock_imports = [
+    'astropy', 
     'cupy',
     'dxchange',
     'matplotlib',
+    'numpy',
+    'olefile',
+    'jupyter', 
+    'xraylib', 
     'holotomocupy.cuda_kernels',
-
     ]
 
