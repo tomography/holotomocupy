@@ -1,7 +1,7 @@
-:mod:`holotomocupy.magnification`
+:mod:`holotomocupy.recon_methods`
 =================================
 
-.. automodule:: holotomocupy.magnification
+.. automodule:: holotomocupy.recon_methods
    :members:
    :show-inheritance:
    :undoc-members:
@@ -10,7 +10,5 @@
 
    .. autosummary::
    
-   M
-   MT
-   
-
+   multiPaganin
+   CTFPurePhase
