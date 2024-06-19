@@ -319,6 +319,7 @@ texinfo_documents = [
 autodoc_mock_imports = [
     'astropy', 
     'cupy',
+    'cupyx',
     'dxchange',
     'matplotlib',
     'numpy',
