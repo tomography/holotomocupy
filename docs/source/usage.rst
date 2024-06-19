@@ -38,9 +38,9 @@ Experimental data reconstruction
 2D Siemens star
 ~~~~~~~~~~~~~~~
 
-:download:`phase retreival by a 1-step method (CTF, MultiPaganin) <../../examples_experimental/siemens_star/rec_1step.ipynb>`
+:download:`phase retreival by a 1-step method (CTF, MultiPaganin) <../../experimental/siemens_star/rec_1step.ipynb>`
 
-:download:`iterative reconstruction with illumination retrieval <../../examples_experimental/siemens_star/rec_iterative.ipynb>`
+:download:`iterative reconstruction with illumination retrieval <../../experimental/siemens_star/rec_iterative.ipynb>`
 
 
 Holotomography reconstruction with coded apertures
@@ -61,16 +61,3 @@ Synthetic 3D ALD
 :download:`generate data for a 3d ALD sample star with coded apertures <../../coded_apertures/3d_ald/modeling.ipynb>`
 
 :download:`joint phase retrieval and tomography reconstruction using the reprojection method <../../coded_apertures/3d_ald/rec_reprojection.ipynb>`-
-
-
-Command Line Interface
-----------------------
-
-**holotomocupy** includes a commad-line-interface (CLI). The simplest way to set a reconstruction parameter is to directly
-pass it as an option to the ``holotomocupy`` command. Some options also accept an argument, while others simple enable certain
-behavior. Parameters given directly via the command line will override those given via a parameter file or global configuration file.
-
-To list all the options supported by the holotomocupy CLI, after installing holotomocupy, type::
-
-    (holotomocupy)$ holotomocupy -h
-

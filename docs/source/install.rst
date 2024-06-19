@@ -5,7 +5,7 @@ Installation
 
 ::
 
-    (base) $ conda create -n holotomocupy -c conda-forge cupy dxchange xraylib matplotlib jupyter astropy olefile
+    (base) $ conda create -n holotomocupy -c conda-forge cupy dxchange xraylib matplotlib jupyter h5py opencv
     (base) $ conda activate holotomocupy
     (holotomocupy)$ $ git clone https://github.com/nikitinvv/holotomocupy
     (holotomocupy)$ $ cd holotomocupy
