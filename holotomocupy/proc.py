@@ -54,7 +54,7 @@ def _dai_yuan_alpha(d,grad,grad0):
     divisor = cp.zeros([d.shape[0]],dtype=d.dtype)
     for k in range(d.shape[0]):
         divident[k] = cp.linalg.norm(grad[k])**2
-        divisor[k] = cp.vdot(d[k], grad[k]-grad0[k])
+        divisor[k] = cp.real(cp.vdot(d[k], grad[k]-grad0[k]))
             
     return [divident,divisor]
 
