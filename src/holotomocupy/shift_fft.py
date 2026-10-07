@@ -61,8 +61,7 @@ The magnification-aware family at the end of the class exists because
 
 PORTED from the holotomocupy `mpi` branch with two changes, both to make it a
 true drop-in for THIS branch's `Shift`:
-  * the constructor takes `nchunk` in Shift's positional slot and `obj_dtype`
-    last, defaulting to complex64;
+  * the constructor takes `nchunk` in Shift's positional slot;
   * `d2curlySc` uses the own-slot pairing of `d2s_kernel` (caller crosses the
     coefficients) rather than folding the crossing into the formula.  See the
     SLOT PAIRING note on that method -- getting this backwards is invisible to
@@ -131,12 +130,11 @@ class ShiftFFT():
     coeff() is the identity (no B-spline prefilter needed for FFT shifts).
     """
 
-    def __init__(self, n, npsi, nz, nzpsi, nchunk=None, obj_dtype='complex64'):
+    def __init__(self, n, npsi, nz, nzpsi, nchunk=None):
         self.n = n
         self.npsi = npsi
         self.nz = nz
         self.nzpsi = nzpsi
-        self.obj_dtype = obj_dtype
 
         # cuFFT plan reuse for the batch.
         if nchunk is not None:
@@ -191,6 +189,20 @@ class ShiftFFT():
         self.j_sq_x  = ((cp.arange(npsi  + n  - 1, dtype='float32') - npsi  // 2) ** 2).astype('float32')
         self.j_sq_y  = ((cp.arange(nzpsi + nz - 1, dtype='float32') - nzpsi // 2) ** 2).astype('float32')
 
+        # Back direction (Sback: small grid -> large grid).  Same Bluestein
+        # machinery with the roles of the two grids swapped, so it needs its
+        # own tables; see Sback for the change of variables.
+        self.L_xb = self._next_pow2(n  + npsi  - 1)
+        self.L_yb = self._next_pow2(nz + nzpsi - 1)
+        self.k_signed_xb = (cp.fft.fftfreq(n ) * cp.float32(n )).astype('float32')
+        self.k_signed_yb = (cp.fft.fftfreq(nz) * cp.float32(nz)).astype('float32')
+        self.k_sq_xb  = (self.k_signed_xb ** 2).astype('float32')
+        self.k_sq_yb  = (self.k_signed_yb ** 2).astype('float32')
+        self.ty_sq_xb = (cp.arange(npsi , dtype='float32') ** 2).astype('float32')
+        self.ty_sq_yb = (cp.arange(nzpsi, dtype='float32') ** 2).astype('float32')
+        self.j_sq_xb  = ((cp.arange(n  + npsi  - 1, dtype='float32') - n  // 2) ** 2).astype('float32')
+        self.j_sq_yb  = ((cp.arange(nz + nzpsi - 1, dtype='float32') - nz // 2) ** 2).astype('float32')
+
         # Match Shift's coeff cache surface so this class is drop-in.
         self.coeff_cache  = {}
         self.coeff_hits   = 0
@@ -198,10 +210,33 @@ class ShiftFFT():
 
     @staticmethod
     def _next_pow2(n):
-        p = 1
-        while p < n:
-            p <<= 1
-        return p
+        """Smallest 2-3-5-7-smooth integer >= n -- cuFFT's fast radices.
+
+        Bluestein only needs L >= N_in + N_out - 1 for the circular
+        convolution to equal the linear one; rounding up to a power of two is
+        an FFT-efficiency habit, not a correctness requirement, and cuFFT is
+        just as happy with any 2/3/5/7-smooth length.  These grids land one
+        past a smooth number almost exactly -- 319 -> 320 instead of 512,
+        2559 -> 2560 instead of 4096 -- so this is ~1.6x off every Bluestein
+        transform.  (Name kept: it is what the tables call.)
+        """
+        if n <= 1:
+            return 1
+        best = 1 << (n - 1).bit_length()           # the power of two, as a bound
+        p5 = 1
+        while p5 < best:
+            p7 = p5
+            while p7 < best:
+                p3 = p7
+                while p3 < best:
+                    v = p3
+                    while v < n:                   # climb in 2s to reach n
+                        v *= 2
+                    best = min(best, v)
+                    p3 *= 3
+                p7 *= 7
+            p5 *= 5
+        return best
 
     @staticmethod
     def _is_unit_mag(m):
@@ -244,12 +279,8 @@ class ShiftFFT():
         return x if x.dtype == cp.complex64 else x.astype('complex64')
 
     def from_complex(self, x):
-        # Adjoint of "cast real→complex" is "take real part"; preserves
-        # exact adjointness in obj_dtype='float32' mode.
-        # Both branches return a fresh contig array — important so the caller
-        # doesn't hold the parent ifft buffer alive via a view.
-        if self.obj_dtype == 'float32':
-            return x.real.astype('float32')
+        # A fresh contig array, so the caller does not hold the parent ifft
+        # buffer alive through a view.
         return cp.ascontiguousarray(x)
 
     def pad_output(self, g):
@@ -295,8 +326,13 @@ class ShiftFFT():
     # h[j] = exp(iπ β j²), j = (κ+ty), evaluated via FFT-convolution of
     # length L = next_pow2(N_in + N_out − 1).
 
-    def _chirpz_lastaxis(self, X, m, b, axis_xy, adjoint):
+    def _chirpz_lastaxis(self, X, m, b, axis_xy, adjoint, spectrum=False):
         """Chirp-z transform along the last axis.
+
+        `spectrum` says X is ALREADY the DFT along the last axis, so step 1
+        below is skipped.  The derivative paths hold fft2(c) and would
+        otherwise inverse-transform it only for this to transform it straight
+        back.
 
         X:        complex64 array, shape [B, K, N_in] for adjoint=False
                   or [B, K, N_out] for adjoint=True (B = ntheta, K may be 1).
@@ -312,10 +348,18 @@ class ShiftFFT():
             N_in, N_out, L = self.npsi,  self.n,  self.L_x
             k_signed = self.k_signed_x
             k_sq, ty_sq, j_sq = self.k_sq_x, self.ty_sq_x, self.j_sq_x
-        else:
+        elif axis_xy == 'y':
             N_in, N_out, L = self.nzpsi, self.nz, self.L_y
             k_signed = self.k_signed_y
             k_sq, ty_sq, j_sq = self.k_sq_y, self.ty_sq_y, self.j_sq_y
+        elif axis_xy == 'xb':                      # back: small -> large
+            N_in, N_out, L = self.n,  self.npsi,  self.L_xb
+            k_signed = self.k_signed_xb
+            k_sq, ty_sq, j_sq = self.k_sq_xb, self.ty_sq_xb, self.j_sq_xb
+        else:                                      # 'yb'
+            N_in, N_out, L = self.nz, self.nzpsi, self.L_yb
+            k_signed = self.k_signed_yb
+            k_sq, ty_sq, j_sq = self.k_sq_yb, self.ty_sq_yb, self.j_sq_yb
 
         B = X.shape[0]
         K = X.shape[1]
@@ -343,8 +387,8 @@ class ShiftFFT():
 
         if not adjoint:
             # Forward: X[B,K,N_in] → g[B,K,N_out]
-            # 1) FFT along last axis.
-            C = cp.fft.fft(X, axis=-1)                                                # [B, K, N_in]
+            # 1) FFT along last axis -- unless the caller already has it.
+            C = X if spectrum else cp.fft.fft(X, axis=-1)                             # [B, K, N_in]
             # 2) Pre-twist (shift phase + pre-chirp).
             a = C * pre_twist[:, None, :]
             # 3) fftshift along last axis so κ = idx − N_in//2 in centered storage.
@@ -396,7 +440,7 @@ class ShiftFFT():
         X_adj = cp.fft.ifft(C_adj, axis=-1, norm='forward')
         return X_adj
 
-    def _chirpz_2d(self, X, m, ry, rx, adjoint):
+    def _chirpz_2d(self, X, m, ry, rx, adjoint, spectrum=False):
         """Separable 2-D chirp-z. Calls the last-axis helper twice — once
         along x, once along y — with appropriate axis swapping to keep
         FFTs on the contiguous last axis.
@@ -414,10 +458,16 @@ class ShiftFFT():
 
         if not adjoint:
             # Forward order: x first (last axis), then y (last axis after swap).
+            # With `spectrum`, X is fft2(c): the x axis is already transformed,
+            # and so is y -- the x pass only touches the last axis, so the y
+            # axis is still a spectrum when the y pass receives it.  Both
+            # leading FFTs drop out.
             X = self.to_complex(ascontig(X))                       # [B, nzpsi, npsi]
-            Y = self._chirpz_lastaxis(X, mx, b_x, 'x', adjoint=False)   # [B, nzpsi, n]
+            Y = self._chirpz_lastaxis(X, mx, b_x, 'x', adjoint=False,
+                                      spectrum=spectrum)                # [B, nzpsi, n]
             Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))            # [B, n, nzpsi]
-            Y = self._chirpz_lastaxis(Y, my, b_y, 'y', adjoint=False)   # [B, n, nz]
+            Y = self._chirpz_lastaxis(Y, my, b_y, 'y', adjoint=False,
+                                      spectrum=spectrum)                # [B, n, nz]
             Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))            # [B, nz, n]
             return Y
 
@@ -494,6 +544,65 @@ class ShiftFFT():
         return self.S(psi, r, m)   # coeff is identity in FFT mode
 
     # ------------------------------------------------------------------
+    # Back-projection shift  (small grid -> large grid), for the Paganin
+    # initial guess and step 5's stitch.  This is NOT Sadj: it resamples in
+    # the opposite direction rather than transposing the operator.
+    # ------------------------------------------------------------------
+
+    def coeff_back(self, psi):
+        return psi                 # no B-spline prefilter in FFT mode
+
+    def _chirpz_2d_back(self, X, m, ry, rx):
+        """Separable 2-D chirp-z for the back direction.
+
+        Sback samples the small grid at
+            u = (t - (N_big-1)/2 + r) / m + (N_small-1)/2
+        which is the forward form  u = m'(t - (N_out-1)/2) - r' + (N_in-1)/2
+        with N_in = N_small, N_out = N_big, m' = 1/m and r' = -r/m.
+        """
+        m = cp.asarray(m).astype('float32')
+        my = cp.ascontiguousarray(1.0 / m[:, 0])
+        mx = cp.ascontiguousarray(1.0 / m[:, 1])
+        ry = -cp.asarray(ry).astype('float32') * my
+        rx = -cp.asarray(rx).astype('float32') * mx
+        b_x = (cp.float32((self.n  - 1) * 0.5) - rx - mx * cp.float32((self.npsi  - 1) * 0.5))
+        b_y = (cp.float32((self.nz - 1) * 0.5) - ry - my * cp.float32((self.nzpsi - 1) * 0.5))
+
+        X = self.to_complex(ascontig(X))                            # [B, nz, n]
+        Y = self._chirpz_lastaxis(X, mx, b_x, 'xb', adjoint=False)  # [B, nz, npsi]
+        Y = cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))            # [B, npsi, nz]
+        Y = self._chirpz_lastaxis(Y, my, b_y, 'yb', adjoint=False)  # [B, npsi, nzpsi]
+        return cp.ascontiguousarray(cp.swapaxes(Y, -2, -1))         # [B, nzpsi, npsi]
+
+    def Sback(self, c, r, m):
+        """Interpolate from the small (nz, n) grid to the large (nzpsi, npsi) one.
+
+        At m = 1 this is a placement plus a Fourier shift by +r, which is
+        exact for a band-limited input; otherwise it goes through the
+        back-direction chirp-z.
+
+        DIFFERS FROM Shift.Sback OUTSIDE THE SMALL GRID.  Where the back-map
+        lands beyond [0, n) the B-spline kernel drops the tap and leaves
+        zero, while this one is periodic and wraps.  Inside, the two agree to
+        ~1e-4 on a band-limited input.  At m < 1 the large grid reaches well
+        outside the small one, so the caller has to mask or weight the result
+        (the demo stitch divides by the per-pixel coverage).
+        """
+        if not self._is_unit_mag(m):
+            return self.from_complex(self._chirpz_2d_back(c, m, cp.asarray(r)[:, 0],
+                                                          cp.asarray(r)[:, 1]))
+        # Place the frame where Sadj places it, then shift by +r rather than
+        # -r: pad_output already folds in the (nzpsi-nz)/2, (npsi-n)/2 offset.
+        py, px = self.phase_separable(cp.asarray(r))
+        C = self.fft2(self.pad_output(c))
+        apply_sep_phase(C, cp.conj(py)[:, :, cp.newaxis],
+                           cp.conj(px)[:, cp.newaxis, :], C)
+        return self.from_complex(self.ifft2(C))
+
+    def curlySback(self, psi, r, m):
+        return self.Sback(self.coeff_back(psi), r, m)
+
+    # ------------------------------------------------------------------
     # Coefficient-space variants
     # ------------------------------------------------------------------
 
@@ -512,8 +621,13 @@ class ShiftFFT():
             c  = self.to_complex(ascontig(c))
             c1 = self.to_complex(ascontig(c1))
             D  = self.deriv_factor(Deltar)
-            combined = c1 + self.ifft2(self.fft2(c) * D)
-            return self.S(combined, r, m)
+            # Sum in the SPECTRUM and let the chirp-z consume it: the old
+            # form ifft2'd here only for S to fft it straight back.
+            combined = self.fft2(c1) + self.fft2(c) * D
+            r = cp.asarray(r)
+            return cp.ascontiguousarray(
+                self._chirpz_2d(combined, m, r[:, 0], r[:, 1], adjoint=False,
+                                spectrum=True).astype('complex64'))
 
         py, px = self.phase_separable(r)
         C  = self.fft2(self.to_complex(ascontig(c)))
@@ -623,9 +737,13 @@ class ShiftFFT():
             C2 = self.fft2(self.to_complex(ascontig(c2)))
             D1 = self.deriv_factor(Deltar1)
             D2 = self.deriv_factor(Deltar2)
-            combined = self.ifft2(C * D1 * D2 + C1 * D1 + C2 * D2)
+            combined = C * D1 * D2 + C1 * D1 + C2 * D2
             del C, C1, C2, D1, D2
-            return self.S(combined, r, m)
+            # straight into the chirp-z as a spectrum, no ifft2/fft2 pair
+            r = cp.asarray(r)
+            return cp.ascontiguousarray(
+                self._chirpz_2d(combined, m, r[:, 0], r[:, 1], adjoint=False,
+                                spectrum=True).astype('complex64'))
 
         py, px = self.phase_separable(r)
         D1 = self.deriv_factor(Deltar1)
@@ -680,11 +798,17 @@ class ShiftFFT():
         CONSUMES C -- it is overwritten in place on the m = 1 path.  Every
         caller below passes a freshly built temporary.
 
-        Always returns complex64, never obj_dtype: these are derivative fields
-        that get multiplied by complex per-pixel weights, and Shift's kernels
-        likewise return complex64 from every curlySc variant."""
+        Always complex64: these are derivative fields multiplied by complex
+        per-pixel weights, as in every Shift curlySc variant."""
         if not self._is_unit_mag(m):
-            return cp.ascontiguousarray(self.S(self.ifft2(C), r, m).astype('complex64'))
+            # C IS the spectrum: hand it to the chirp-z directly instead of
+            # ifft2-ing it so that S can fft it straight back.  Saves the
+            # ifft2 pair and the leading FFT of each chirp-z axis -- four
+            # transforms of the ten this call used to cost.
+            r = cp.asarray(r)
+            return cp.ascontiguousarray(
+                self._chirpz_2d(C, m, r[:, 0], r[:, 1], adjoint=False,
+                                spectrum=True).astype('complex64'))
         py, px = self.phase_separable(r)
         apply_sep_phase(C, py[:, :, cp.newaxis], px[:, cp.newaxis, :], C)
         s = self.ifft2(C)

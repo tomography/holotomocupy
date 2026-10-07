@@ -148,7 +148,7 @@ gen = Rec(make_args(NDOBJ, 1))
 gen.vars['obj'][:] = phantom(nzobj, NDOBJ)
 gen.vars['prb'][:] = PRB
 gen.vars['pos'][:] = POS
-gen.gen_sqrt_data(gen.vars, gen.data)
+gen.gen_data(gen.vars, gen.data)
 gen.cl_prb_term.gen_sqrt_ref(gen.vars['prb'], gen.ref)
 DATA = np.array(gen.data)
 free(gen)

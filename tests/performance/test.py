@@ -5,7 +5,7 @@ Multi-distance holotomography performance benchmark on fully-synthetic data.
 Generates everything in-process (no Reader / h5 I/O): rotation angles,
 positions, and a random sqrt(intensity) data array. Like test_mosaic.py,
 nothing is forward-modelled -- there is no object to synthesize and no
-Rec.gen_sqrt_data pass. The reconstruction starts from scratch (zero object,
+Rec.gen_data pass. The reconstruction starts from scratch (zero object,
 flat probe) exactly as a from-scratch production run does, then runs BH for
 `--niter` iterations and prints a timing summary.
 
@@ -302,7 +302,7 @@ def synth_pos(st, end, ntheta_global, ss):
 
 
 def synth_data(out, st, end, ntheta_global, ss):
-    """Fill the pinned [ndist, local_ntheta, nz, n] sqrt-intensity buffer.
+    """Fill the pinned [ndist, local_ntheta, nz, n] intensity buffer.
 
     One random frame per distance, scaled by a per-(angle, distance) factor —
     a memory-bandwidth-bound fill rather than several hundred GB of RNG.

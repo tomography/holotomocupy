@@ -271,7 +271,7 @@ if rank == 0 and has_shrink:
                     f'B=({tp_true[k,1,0]:+.4e}, {tp_true[k,1,1]:+.4e})  (y, x)')
 cl.vars['tp'][:] = cp.asarray(tp_true)
 # shrink_nd is the diagnostic copy Rec keeps of the same profile; filling it
-# keeps the data mask and gen_sqrt_data's demagnification consistent.
+# keeps the data mask and gen_data's demagnification consistent.
 cl.shrink_nd[:] = cp.asarray(
     np.ascontiguousarray(shrink_true[cl.st_theta:cl.end_theta].transpose(1, 0, 2)))
 
@@ -410,7 +410,7 @@ C.set_pos(cl, pos)
 # --- forward model ----------------------------------------------------------
 logger.info('generating data')
 t0 = time.time()
-cl.gen_sqrt_data(cl.vars, cl.data)
+cl.gen_data(cl.vars, cl.data)
 
 # The projected phase actually seen by exp(1j*proj), measured rather than
 # derived: the Radon normalisation folds n, ntheta and norm_const together, so
@@ -454,7 +454,7 @@ comm.Barrier()
 if rank == 0:
     d = cl.data
     logger.info(f'rank-0 data range [{float(d.min()):.4f}, {float(d.max()):.4f}] '
-                f'(sqrt intensity), mean {float(d.mean()):.4f}')
+                f'(intensity), mean {float(d.mean()):.4f}')
     logger.info(f'true displacements: max |y| = {np.abs(pos[...,0]).max():.3f} px, '
                 f'max |x| = {np.abs(pos[...,1]).max():.3f} px')
     if has_shrink:

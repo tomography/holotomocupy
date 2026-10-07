@@ -88,7 +88,31 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
         return;
     }
 
-    float2 g0 = (dir == 0) ? make_float2(0.0f, 0.0f) : g[g_ind];
+    // ROTATION AXIS AT (N-1)/2, NOT N/2.
+    // The fftshift-by-sign convention puts the object's rotation centre at
+    // index n/2 and the detector origin at nd/2.  n/2 is not the geometric
+    // middle of pixels 0..n-1, so that axis sits at physical N0/2 + 0.5/scale
+    // -- it DRIFTS when the data is binned, and the reader had to cancel the
+    // drift with a 0.5*(scale-1) term.  Referencing both to (N-1)/2 pins the
+    // axis at the detector middle for every bin level, so a shift measured
+    // from the middle just scales by 2.
+    //
+    // Current minus wanted is a per-angle detector shift
+    //     d(theta) = (cos - sin)/2 - 1/2        (0 at theta=0, -1 at 90 deg)
+    // and undoing it is one phase on the gathered sample.  dir==1 applies the
+    // conjugate before scattering, so R and RT stay an exact adjoint pair.
+    const float d_ax = 0.5f * (__cosf(theta[ty]) - __sinf(theta[ty])) - 0.5f;
+    float sn_ax, cs_ax;
+    __sincosf(-6.283185307179586f * fr * d_ax, &sn_ax, &cs_ax);
+
+    float2 g0;
+    if (dir == 0) {
+        g0 = make_float2(0.0f, 0.0f);
+    } else {
+        const float2 gin = g[g_ind];                       // conj(phase) * gin
+        g0 = make_float2( cs_ax * gin.x + sn_ax * gin.y,
+                         -sn_ax * gin.x + cs_ax * gin.y);
+    }
 
     const int base_x  = (int)floorf(ftwon * x0) - m;
     const int base_y  = (int)floorf(ftwon * y0) - m;
@@ -132,8 +156,10 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
 
     if (dir == 0)
     {
-        g[g_ind].x = g0.x / n;
-        g[g_ind].y = g0.y / n;
+        const float gx = cs_ax * g0.x - sn_ax * g0.y;      // phase * g0
+        const float gy = sn_ax * g0.x + cs_ax * g0.y;
+        g[g_ind].x = gx / n;
+        g[g_ind].y = gy / n;
     }
 }
 """,

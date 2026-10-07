@@ -322,7 +322,7 @@ def synth_pos(st, end, ntheta_global, ss):
 
 
 def synth_data(out, st, end, ntheta_global, ss):
-    """Fill the pinned [ndist, local_ntheta, nz, n] sqrt-intensity buffer."""
+    """Fill the pinned [ndist, local_ntheta, nz, n] intensity buffer."""
     nl = end - st
     if nl == 0:
         return

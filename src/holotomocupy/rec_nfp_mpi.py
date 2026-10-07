@@ -15,6 +15,7 @@ from .chunking import Chunking
 from .utils import (make_pinned, mshow, mshow_polar, mshow_pos, redot,
                     reprod, timer, write_tiff)
 from .mpi_functions import MPIClass
+from .psf import psf_taps, psf_blur
 from .logger_config import logger
 
 np.set_printoptions(legacy="1.25")
@@ -44,7 +45,6 @@ class RecNFP:
 
         # proj/obj arrays are complex64. A subclass wanting a real-valued
         # vars['proj'] can flip this to 'float32' around alloc_arrays().
-        self.obj_dtype = 'complex64'
 
         self.shift_type = getattr(args, 'shift_type', 'cubic')
 
@@ -94,6 +94,31 @@ class RecNFP:
         if not hasattr(self, 'rho_trial_error_step'):
             self.rho_trial_error_step = -1
 
+        # Detector PSF as ONE Gaussian on the detector
+        # INTENSITY (see the F0 block and psf.psf_taps).  sigma is in detector
+        # pixels of the grid the data is on -- for NFP that is the unbinned
+        # detector, so no bin factor enters.  Absent or 0 -> psf_w is None and
+        # _blur is the identity, which is the pre-PSF behaviour exactly.
+        self.psf_sigma, self.psf_w = psf_taps(getattr(args, 'psf_sigma', 0.0))
+        if self.psf_w is not None and self.rank == 0:
+            logger.info(
+                f"PSF: one Gaussian on the detector intensity, "
+                f"sigma={self.psf_sigma:g} det.px ({self.psf_w.size} taps)")
+
+        # Data-misfit model, 'intensity' (default) or 'amplitude'; orthogonal to
+        # psf_sigma, both blur the model intensity with the same K.  See the F0
+        # block here and config._parse_model.  Absent key -> 'intensity', so
+        # every existing step0 config is unaffected.
+        self.model = getattr(args, 'model', 'intensity')
+        if self.model not in ('intensity', 'amplitude'):
+            raise ValueError(f"model must be 'intensity' or 'amplitude', "
+                             f"got {self.model!r}")
+        if self.model != 'intensity' and self.rank == 0:
+            logger.info(
+                "misfit model: AMPLITUDE, 1/N sum (sqrt(K|psi|^2) - sqrt(d))^2"
+                " -- err is ~4x smaller than under the intensity model and the"
+                " two are NOT comparable")
+
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
@@ -117,18 +142,19 @@ class RecNFP:
         self.mulc_batch   = self.cl_chunking.mulc_batch
         self.allreduce    = self.cl_mpi.allreduce
         self.allreduce2   = self.cl_mpi.allreduce2
+        self.allreduce_scalars = self.cl_mpi.allreduce_scalars
 
     def alloc_arrays(self):
         self.vars = {
             'prb':  cp.empty([self.nz, self.n],       dtype='complex64'),
-            'proj': cp.zeros([self.nzobj, self.nobj],  dtype=self.obj_dtype),
+            'proj': cp.zeros([self.nzobj, self.nobj],  dtype='complex64'),
             'pos':  cp.zeros([self.local_ntheta, 2],   dtype='float32'),
         }
         self.data = make_pinned([self.local_ntheta, self.nz, self.n], dtype='float32')
         self.grads, self.etas = {}, {}
         for ge in self.grads, self.etas:
             ge['prb']  = cp.zeros([self.nz, self.n],      dtype='complex64')
-            ge['proj'] = cp.zeros([self.nzobj, self.nobj], dtype=self.obj_dtype)
+            ge['proj'] = cp.zeros([self.nzobj, self.nobj], dtype='complex64')
             ge['pos']  = cp.zeros([self.local_ntheta, 2],  dtype='float32')
 
     def BH(self, writer=None):
@@ -152,8 +178,11 @@ class RecNFP:
         for i in range(self.start_iter, self.niter):
             with nvtx.annotate(f"::BH:nfp:{i}"):
                 self.compute_gradient(vars, grads)
-                self.compute_beta(vars, grads, etas, i)
-                alpha = self.compute_alpha(vars, grads, etas)
+                if getattr(self, 'fused_hessian', True):
+                    alpha = self._compute_step_fused(vars, grads, etas, i)
+                else:                      # the old three-sweep path
+                    self.compute_beta(vars, grads, etas, i)
+                    alpha = self.compute_alpha(vars, grads, etas)
                 self.apply_step(vars, etas, alpha)
                 self.log_iter(vars, i, writer)
 
@@ -400,6 +429,120 @@ class RecNFP:
         )
         return out[0].get()
 
+    def hessian3(self, vars, grads, etas):
+        """{B(g,g), B(g,e), B(e,e)} from ONE cascade sweep.
+
+        The three bilinear forms the step needs, instead of three separate
+        `hessian` calls.  The x-chain -- which streams the data and the three
+        proj/prb chunks and is essentially all of the cost -- is advanced once
+        and shared.  NFP has no probe-fit or Laplacian term, so this is the
+        whole Hessian.
+        """
+        return self.hessian_cascade3(vars, grads, etas)
+
+    @timer
+    def hessian_cascade3(self, vars, grads, etas):
+        out = cp.zeros(3, dtype="float32")
+        # Chunking treats a non-proper output by its axis-0 length, so 3 must
+        # not be the chunk's theta count.
+        assert self.local_ntheta != 3, "local_ntheta==3 aliases the accumulator"
+
+        @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
+        def _hessian_cascade3(
+            self, out, d,
+            x2, g2, e2,   # pos  -- proper (theta-distributed)
+            x0, g0, e0,   # prb  -- non-proper gpu
+            x1, g1, e1,   # proj -- non-proper gpu
+        ):
+            self.cl_shift.coeff_cache_reset()
+            x = [x0, x1, x2]
+            g = [g0, g1, g2]
+            e = [e0, e1, e2]
+            # Passing the SAME list object on the diagonal forms keeps the
+            # `y is z` fast paths in d2F_dF1/d2F_dF3 alive.
+            wgg = [None, None, None]
+            wge = [None, None, None]
+            wee = [None, None, None]
+            for id in range(1, len(self.F))[::-1]:
+                # all three contractions before dF advances the chains: they
+                # must see the pre-update x, g, e
+                wgg = self.d2F_dF[id](x, g, g, wgg)
+                wge = self.d2F_dF[id](x, g, e, wge)
+                wee = self.d2F_dF[id](x, e, e, wee)
+                fx, gn = self.dF[id](x, g)
+                en = self.dF[id](x, e, return_x=False)
+                x, g, e = fx, gn, en
+            out[0:1] += self.d2F_dF[0](x, g, g, wgg, d)
+            out[1:2] += self.d2F_dF[0](x, g, e, wge, d)
+            out[2:3] += self.d2F_dF[0](x, e, e, wee, d)
+
+        _hessian_cascade3(
+            self, out, self.data,
+            vars["pos"],  grads["pos"],  etas["pos"],
+            vars["prb"],  grads["prb"],  etas["prb"],
+            vars["proj"], grads["proj"], etas["proj"],
+        )
+        h = out.get()
+        return float(h[0]), float(h[1]), float(h[2])
+
+    def _compute_step_fused(self, vars, grads, etas, i):
+        """beta, the etas update and alpha from ONE sweep instead of three.
+
+        Same algebra as the three-sweep path: with eta_new = beta*eta - g,
+            B(eta_new, eta_new) = beta^2 B(e,e) - 2 beta B(g,e) + B(g,g)
+        so the two ratios come out of {Qgg, Bge, Qee}.  `check_fused_hessian`
+        re-measures both the classic way and logs the difference.
+        """
+        check = getattr(self, 'check_fused_hessian', False)
+        Qgg, Bge, Qee = self.allreduce_scalars(*self.hessian3(vars, grads, etas))
+
+        # First iteration is steepest descent: etas is zero, so the sweep
+        # measured Bge = Qee = 0 and only the ratio needs the special case.
+        #
+        # powell_restart floors beta at 0 (Bge < 0 means the new gradient
+        # couples negatively to the old direction, so beta*e points away from
+        # descent and dropping it is a valid CG restart).  OFF by default here:
+        # it is a change of ALGORITHM, not of cost, and beta really does come
+        # out negative on most iterations of this problem, so leaving it off
+        # keeps the fused path arithmetically identical to the three-sweep one.
+        beta = 0.0 if i == self.start_iter else Bge / Qee
+        if getattr(self, 'powell_restart', False):
+            beta = max(beta, 0.0)
+        if check and i > self.start_iter:
+            t, b = self.allreduce2(self.hessian(vars, grads, etas),
+                                   self.hessian(vars, etas, etas))
+            self._log_fused_check(i, "beta", beta, t / b)
+
+        # etas <- beta*etas - grads, and the alpha numerator with it.  Must run
+        # AFTER the sweep: it overwrites the direction the sweep just read.
+        top = 0.0
+        for v in self._var_names:
+            self.linear_batch(etas[v], grads[v], beta, -1)
+            if v == 'pos' or self.rank == 0:      # prb/proj are replicated
+                top -= self.redot_batch(grads[v], etas[v]) / self.rho_sq[v]
+        top, = self.allreduce_scalars(top)
+
+        bottom = beta * beta * Qee - 2.0 * beta * Bge + Qgg
+        scale = abs(beta * beta * Qee) + abs(2.0 * beta * Bge) + abs(Qgg)
+        if check:
+            ref = self.allreduce_scalars(self.hessian(vars, etas, etas))[0]
+            self._log_fused_check(i, "bottom", bottom, ref)
+        if not bottom > 1e-6 * scale:
+            # Concave or flat along eta: top/bottom would be a negative alpha
+            # and the update would walk uphill.  top = <-grad, eta> > 0 for any
+            # descent direction, so |bottom| keeps the step downhill.
+            logger.warning(
+                f"iter={i}: non-convex alpha denominator bottom={bottom:.6e} "
+                f"from Qgg={Qgg:.6e} Bge={Bge:.6e} Qee={Qee:.6e} beta={beta:.6e}"
+                f" -- stepping along |bottom| instead of taking alpha<0")
+            bottom = abs(bottom) if bottom != 0.0 else 1e-6 * scale
+        return top / bottom
+
+    def _log_fused_check(self, i, name, got, ref):
+        rel = abs(got - ref) / abs(ref) if ref != 0 else abs(got)
+        logger.info(f"iter={i}: fused-check {name:>6}  fused={got:+.9e}  "
+                    f"measured={ref:+.9e}  rel={rel:.3e}")
+
     def gradients(self, vars, grads):
         self.gradients_cascade(vars, grads)
         grads['prb'][:]  = cp.array(self.allreduce(grads['prb'].get()))
@@ -431,7 +574,7 @@ class RecNFP:
     # F3: (prb, proj, pos) → (prb, S_pos(proj))
     # F2: (prb, shifted_proj) → (prb, exp(i·shifted_proj))
     # F1: (prb, exp_proj) → D(prb · exp_proj)
-    # F0: ||·| - d||²
+    # F0: ||K|·|² - d||²  (INTENSITY, PSF-blurred; see the F0 block)
     #################################################################
 
     def apply_F_from(self, x, from_level):
@@ -442,47 +585,145 @@ class RecNFP:
             x = self.F[k](x)
         return x
 
-    ####### F0: ||x0| - d||² / data_size
+    ####### F0(x0) = 1/n \|g(K|x0|^2, d)\|_2^2
+    #
+    # TWO MISFIT MODELS, selected by self.model, exactly as in rec_mpi.Rec.F0
+    # (read the long comment there; this is the same thing with W = 1).  With
+    # I = |x|^2, J = K I the blurred MODEL intensity, a = sqrt(J) and
+    # s = sqrt(d):
+    #
+    #   intensity   F0 = 1/N sum (J - d)^2
+    #   amplitude   F0 = 1/N sum (a - s)^2
+    #
+    # PSF WORKS IN BOTH and sits in the same place in both: the detector PSF
+    # from the finite focal spot and the detector PSF blur INTENSITY,
+    # incoherently, so neither can be folded into cl_prop.D (which is coherent)
+    # and their only legal home is on I.  Both are Gaussian, so they are carried
+    # as ONE Gaussian K (see psf.psf_blur; it is self-adjoint, so K^T is
+    # literally K), the identity when psf_sigma is unset.  The amplitude model
+    # then compares sqrt(K I) against sqrt(d) -- the blur stays on intensity and
+    # only the COMPARISON moves -- which at psf_sigma = 0 is exactly the misfit
+    # the step0 drivers used before the move to intensity.
+    #
+    # d IS THE MEASURED INTENSITY IN BOTH, not its square root.  The step0.py
+    # drivers used to take the sqrt on load, back when the only misfit was the
+    # amplitude one; they no longer do, and gen_data generates intensity to
+    # match.  Nothing squares d, and the amplitude path takes its own sqrt here.
+    #
+    # There is no detector mask here, unlike rec_mpi: NFP never shifts the
+    # object off its own grid, so every detector pixel is in range and W = 1.
+    #
+    # ONE SET OF DERIVATIVES COVERS BOTH.  Writing the misfit as 1/N sum g(J),
+    # with u = Re(conj(x) z), v = Re(conj(x) y) and dJ[z] = 2 K(u):
+    #
+    #   dF0[y]    = 4/N sum p v                          p = K[g'/2]
+    #   d2F0[y,z] = 4/N sum { 2 t v + p Re(conj(z) y) }  t = K[(g''/2) K u]
+    #                                 (+ 4/N sum p Re(conj(x) w))
+    #
+    #                g               g'/2 (_pw)        g''/2 (_cw factor)
+    #   intensity    (J - d)^2       J - d              1
+    #   amplitude    (a - s)^2       (a - s)/(2a)       s/(4 a^3)
+    #
+    # The amplitude row divides by a and a^3 -- which is why this misfit was
+    # dropped in the first place -- so both denominators are floored at
+    # _AMP_FLOOR; F0 itself stays exact.  The intensity row divides by nothing
+    # and needs no floor.  g''/2 >= 0 for both, so the t term is a genuine
+    # square in the quadratic form and all the indefiniteness is in p, which is
+    # proportional to the residual and vanishes at the solution.  Both Hessian
+    # terms are manifestly symmetric in y,z.  The Hessian needs TWO nested
+    # convolutions; it is not a substitution into a pointwise kernel.
+    #
+    # err is NOT comparable across the two models (amplitude is ~4x smaller with
+    # flat-field-normalised data), and neither is it comparable with runs made
+    # before the move to intensity.
+
+    # Floor on the model amplitude a = sqrt(K|x|^2) in the amplitude model's two
+    # denominators; see the same constant in rec_mpi.Rec.
+    _AMP_FLOOR = np.float32(1e-3)
+
+    def _blur(self, x):
+        """K x, the one Gaussian on the detector intensity, identity if unset.
+
+        K^T = K (see psf.psf_blur), so this one call serves both directions."""
+        return x if self.psf_w is None else psf_blur(x, self.psf_w)
+
     @staticmethod
     @cp.fuse()
-    def _F0_fused(x, d):
-        t = cp.abs(x) - d
+    def _F0_fused(J, d):
+        t = J - d
         return t * t
 
-    def F0(self, x, d):
-        return 1 / self.data_size * cp.sum(self._F0_fused(x, d))
+    @staticmethod
+    @cp.fuse()
+    def _F0_fused_amp(J, d):
+        t = cp.sqrt(J) - cp.sqrt(d)
+        return t * t
 
     @staticmethod
     @cp.fuse()
-    def _dF0_fused(x, d):
-        return x - d * (x / cp.abs(x))
-
-    def dF0(self, x, y, d, return_x=False):
-        return 2 / self.data_size * redot(self._dF0_fused(x, d), y)
+    def _r_fused_amp(J, d, floor):
+        a = cp.maximum(cp.sqrt(J), floor)
+        return 0.5 * (1.0 - cp.sqrt(d) / a)
 
     @staticmethod
     @cp.fuse()
-    def _d2F_dF0_fused(x, y, z, w, d):
-        absval = cp.abs(x)
-        l0 = x / absval
-        d0 = d / absval
-        v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
-        if w is not None:
-            v += reprod(x - d * l0, w)
+    def _c_fused_amp(v, J, d, floor):
+        a = cp.maximum(cp.sqrt(J), floor)
+        return (0.25 * cp.sqrt(d) / (a * a * a)) * v
+
+    def _pw(self, J, d):
+        """g'(J)/2, the pre-blur residual weight: (J - d) for intensity,
+        (a - sqrt(d))/(2a) for amplitude."""
+        if self.model == 'amplitude':
+            return self._r_fused_amp(J, d, self._AMP_FLOOR)
+        return J - d
+
+    def _cw(self, v, J, d):
+        """g''(J)/2 * v: v itself for intensity, sqrt(d)/(4a^3) * v for
+        amplitude."""
+        if self.model == 'amplitude':
+            return self._c_fused_amp(v, J, d, self._AMP_FLOOR)
         return v
 
-    def d2F_dF0(self, x, y, z, w, d):
-        return 2 / self.data_size * cp.sum(self._d2F_dF0_fused(x, y, z, w, d))
+    def _F0_p(self, x, d):
+        """p = K[g'(K|x|^2)/2], the pointwise weight both derivatives use."""
+        return self._blur(self._pw(self._blur(reprod(x, x)), d))
+
+    def F0(self, x, d):
+        J = self._blur(reprod(x, x))
+        kern = (self._F0_fused_amp if self.model == 'amplitude'
+                else self._F0_fused)
+        return 1 / self.data_size * cp.sum(kern(J, d))
+
+    def dF0(self, x, y, d, return_x=False):
+        return 4 / self.data_size * redot(self._F0_p(x, d) * x, y)
 
     @staticmethod
     @cp.fuse()
-    def _gF0_fused(x, y, scale):
-        td = y * (x / cp.abs(x))
-        return scale * (x - td)
+    def _d2F_dF0_fused(t, p, x, y, z):
+        return 2 * t * reprod(x, y) + p * reprod(z, y)
+
+    def d2F_dF0(self, x, y, z, w, d):
+        # J is kept live: the amplitude curvature weight needs it as well as p
+        J = self._blur(reprod(x, x))
+        p = self._blur(self._pw(J, d))
+        # the two nested convolutions (K^T = K, so both are the same call)
+        t = self._blur(self._cw(self._blur(reprod(x, z)), J, d))
+        v = self._d2F_dF0_fused(t, p, x, y, z)
+        if w is not None:
+            v += p * reprod(x, w)
+        return 4 / self.data_size * cp.sum(v)
+
+    @staticmethod
+    @cp.fuse()
+    def _gF0_fused(x, p, scale):
+        return (scale * p) * x
 
     def gF0(self, x, y):
+        """In: x, y = the data d."""
         x = self.apply_F_from(x, 1)
-        return self._gF0_fused(x, y, np.float32(2 / self.data_size))
+        return self._gF0_fused(x, self._F0_p(x, y),
+                               np.float32(4 / self.data_size))
 
     ####### F1: (prb, exp_proj) → D(prb · exp_proj)
     def F1(self, x):
@@ -699,12 +940,17 @@ class RecNFP:
                 os.makedirs(os.path.dirname(name), exist_ok=True)
                 self.table.to_csv(name, index=False)
 
-    def gen_sqrt_data(self, vars, out):
-        """Generate synthetic sqrt(intensity) data."""
+    def gen_data(self, vars, out):
+        """Generate synthetic data.
+
+        Writes INTENSITY, K|psi|^2 -- the same quantity F0 compares against,
+        blur included, so a test against it is not vacuous.  (It wrote the
+        amplitude, and was called gen_sqrt_data, while the misfit was on
+        amplitudes.)"""
         @self.gpu_batch(axis_out=0, axis_inp=0, nout=1)
         def _gen_data(self, out, pos, prb, proj):
             self.cl_shift.coeff_cache_reset()
             x = [prb, proj, pos]
             y = self.apply_F_from(x, 1)
-            out[:] = cp.abs(y)
+            out[:] = self._blur(reprod(y, y))
         _gen_data(self, out, vars['pos'], vars['prb'], vars['proj'])

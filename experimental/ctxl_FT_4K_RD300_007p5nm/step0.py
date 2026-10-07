@@ -63,7 +63,7 @@ rank = comm.Get_rank()
 # ---------------------------------------------------------------------------
 meta = read_nxtomo_meta(nx_file)
 
-energy     = meta['energy']
+energy     = args.energy if args.energy is not None else meta['energy']
 z1         = meta['z1']
 z_total    = meta['z_total']
 pixel_size = meta['pixel_size']
@@ -123,6 +123,11 @@ rec_args = SimpleNamespace(
     checkpoint_step = checkpoint_step,
     error_step = error_step,
     start_iter              = 0,
+    psf_sigma               = args.psf_sigma,
+    shift_type              = args.shift_type,
+    estimate_rho            = args.estimate_rho,
+    rho_estimate_niter      = args.rho_estimate_niter,
+    rho_trial_error_step    = args.rho_trial_error_step,
     path_out                = _path_out,
     comm                    = comm,
 )
@@ -130,7 +135,12 @@ rec_args = SimpleNamespace(
 cl = RecNFP(rec_args)
 
 # ---------------------------------------------------------------------------
-# Load data: dark-subtract, normalise by global mean, take sqrt
+# Load data: dark-subtract, normalise by global mean.
+#
+# cl.data is the INTENSITY, not its square root: RecNFP.F0 compares K|psi|^2
+# with d (see the F0 block in rec_nfp_mpi).  It used to be sqrt(I) because the
+# misfit was on amplitudes.  Normalising by the global mean still puts it at
+# ~1, which is the scale rho and the PSF were tuned at.
 # ---------------------------------------------------------------------------
 fr = NxFrames(nx_file)
 if fr.missing:
@@ -157,7 +167,7 @@ local_sum  = float(raw.sum())
 global_sum = comm.allreduce(local_sum, op=MPI.SUM)
 global_mean = global_sum / (ntheta * n * n)
 
-cl.data[:]          = np.sqrt(raw / (global_mean + 1e-5))
+cl.data[:]          = raw / (global_mean + 1e-5)
 cl.vars['proj'][:]  = 0
 cl.vars['prb'][:]   = 1
 cl.vars['pos'][:]   = cp.array(pos[cl.st_theta:cl.end_theta])

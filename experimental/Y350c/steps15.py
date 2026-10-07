@@ -503,7 +503,7 @@ else:
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
-    cl_shift = Shift(n, nobj, n, nobj, 'complex64')
+    cl_shift = Shift(n, nobj, n, nobj)
     cref     = cp.array(ref)
 
     # Smooth reference with Gaussian (Peter's approach): divide by blurred ref
@@ -654,7 +654,7 @@ else:
 
         scale = 1.0 / 2**bin
         r     = (cshifts * scale).astype('float32')
-        r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+        r[..., 1] += rotation_center_shift * scale
         r_gpu = cp.array(r)
 
         # Ref for this bin level (rank 0 → Bcast)
@@ -669,7 +669,7 @@ else:
         fwhm_ref    = 17.0 * (n_bin / 2048)
         sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
         cref_smooth = cp.stack([ndimage.gaussian_filter(cref[k], sigma_ref) for k in range(ndist)])
-        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin,  'complex64')
+        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin)
         npad_bin = n_bin // 16
         v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
         v_bin    = v_bin**5 * (126 - 420*v_bin + 540*v_bin**2 - 315*v_bin**3 + 70*v_bin**4)

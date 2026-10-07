@@ -274,18 +274,48 @@ class Chunking:
                 *inp[proper_inp + nonproper_inp :],
             )
 
+        # All three stages of chunk j run on stream[j % 3], so h2d -> compute
+        # -> d2h is already stream-ordered. Only three hazards remain, and all
+        # three are events rather than a host synchronize() per step -- that
+        # barrier drained the device every iteration and cost 1.1-1.4x
+        # (tests/performance/bench_chunking.py).
+        ev_p = [cp.cuda.Event(disable_timing=True) for _ in range(3)]
+        ev_g = [cp.cuda.Event(disable_timing=True) for _ in range(3)]
+        rec_p, rec_g = [False] * 3, [False] * 3
+
         for k in range(nchunk + 2):
             if k < nchunk:
-                with stream[k % 3]:
+                s = stream[k % 3]
+                with s:
+                    # WAR: this input buffer was last read by compute(k-2)
+                    if k >= 2 and rec_p[(k - 2) % 3]:
+                        s.wait_event(ev_p[(k - 2) % 3])
                     p2g(k % 2, k)
             if 0 < k < nchunk + 1:
-                with stream[(k - 1) % 3]:
-                    p((k - 1) % 2, k - 1)
+                j = k - 1
+                s = stream[j % 3]
+                with s:
+                    # WAR: this output buffer was last read by d2h(j-2)
+                    if j >= 2 and rec_g[(j - 2) % 3]:
+                        s.wait_event(ev_g[(j - 2) % 3])
+                    # non-proper outputs are shared accumulators (res += ...),
+                    # so computes must not run concurrently
+                    if j >= 1 and rec_p[(j - 1) % 3]:
+                        s.wait_event(ev_p[(j - 1) % 3])
+                    p(j % 2, j)
+                    ev_p[j % 3].record(s)
+                    rec_p[j % 3] = True
             if 1 < k:
-                with stream[(k - 2) % 3]:
-                    g2p((k - 2) % 2, k - 2)
-            for s in stream:
-                s.synchronize()
+                j = k - 2
+                s = stream[j % 3]
+                with s:
+                    g2p(j % 2, j)
+                    ev_g[j % 3].record(s)
+                    rec_g[j % 3] = True
+        # one host sync, so numpy outputs are readable and the caller's stream
+        # is ordered after everything above
+        for s in stream:
+            s.synchronize()
 
     def alloc_double_buffers(self, arrs, axis, gpu_mem, offset, chunk):
         """Allocate double-buffered GPU arrays from the pre-allocated pool.

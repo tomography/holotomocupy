@@ -134,7 +134,7 @@ comm.Bcast(cshifts, root=0)
 
 scale = 1.0 / 2**bin
 r = (cshifts * scale).astype('float32')
-r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+r[..., 1] += rotation_center_shift * scale
 r_gpu = cp.array(r)
 
 if rank == 0:
@@ -154,7 +154,7 @@ sigma_ref   = fwhm_ref / (2 * np.sqrt(2 * np.log(2)))
 cref_smooth     = cp.stack([ndimage.gaussian_filter(cref[k],     sigma_ref) for k in range(ndist)])
 cref_end_smooth = cp.stack([ndimage.gaussian_filter(cref_end[k], sigma_ref) for k in range(ndist)])
 t_scale = max(ntheta - 1, 1)
-cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 'complex64')
+cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin)
 npad_bin = n_bin // 16
 v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
 v_bin    = v_bin**5 * (126 - 420*v_bin + 540*v_bin**2 - 315*v_bin**3 + 70*v_bin**4)

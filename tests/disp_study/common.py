@@ -813,27 +813,30 @@ def gen_ref(cl, prb):
 
 
 # --- Poisson noise ----------------------------------------------------------
-def add_poisson_noise(sqrt_data, photons, seed):
-    """In-place Poisson noise on sqrt-intensity data of any leading shape.
+def add_poisson_noise(data, photons, seed):
+    """In-place Poisson noise on INTENSITY data of any leading shape.
 
     `photons` is the mean number of detected photons per pixel for an
     unattenuated beam (the probe is normalised to mean |prb| = 1, so the
     intensity is ~1 in the flat regions).  photons <= 0 leaves the data alone.
+
+    Takes and returns intensity, matching Rec.gen_data and Reader.read_data --
+    it used to do the same job on amplitudes, squaring and un-squaring around
+    the draw, back when the misfit was on amplitudes.
     """
     if photons <= 0:
-        return sqrt_data
+        return data
     rng = np.random.default_rng(seed)
     # one frame at a time, so the float64 temporary stays small
-    for idx in np.ndindex(sqrt_data.shape[:-2]):
-        inten = sqrt_data[idx].astype('float64') ** 2 * photons
-        inten = rng.poisson(inten)
-        sqrt_data[idx] = np.sqrt(inten / photons).astype('float32')
-    return sqrt_data
+    for idx in np.ndindex(data.shape[:-2]):
+        inten = rng.poisson(data[idx].astype('float64') * photons)
+        data[idx] = (inten / photons).astype('float32')
+    return data
 
 
 # --- dataset file layout ----------------------------------------------------
 # {out}/data.h5
-#   /data      (ndist, ntheta, nz, n)  float32  sqrt of measured intensity
+#   /data      (ndist, ntheta, nz, n)  float32  measured intensity
 #                                               (distance-major: same order as
 #                                                Rec.data, so reads are direct)
 #   /ref       (ndist, nz, n)          float32  sqrt of flat-field intensity

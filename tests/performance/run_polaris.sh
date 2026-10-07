@@ -5,7 +5,7 @@
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:eagle
 #PBS -q debug
-#PBS -A 14238
+#PBS -A 17445
 #PBS -j oe
 # Single-tile perf benchmark on Polaris (4 x A100 40 GB, 512 GB per node).
 # Same measurement as run.sh; nchunk is sized for a 40 GB card and the ranks

@@ -116,7 +116,7 @@ class MosaicReader(Reader):
 
         scale = np.float32(1.0 / 2**self.bin)
         out *= scale
-        out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
+        out[..., 1] += np.float32(self.rotation_center_shift * scale)
         return out
 
     def read_ref(self, out=None):
@@ -144,7 +144,10 @@ class MosaicReader(Reader):
         return out
 
     def read_data(self, out=None):
-        """[ndist, local_ntheta, nz, n], pdata{k} of tile t at index t*ndist_tile+k."""
+        """[ndist, local_ntheta, nz, n], pdata{k} of tile t at index t*ndist_tile+k.
+
+        Measured INTENSITY, matching holotomocupy.reader.Reader.read_data: Rec.F0
+        is an intensity misfit, so no sqrt is taken here."""
         nz, n = self.nz, self.n
         nl    = self.end_theta - self.st_theta
         nd    = self.ndist_tile
@@ -163,5 +166,4 @@ class MosaicReader(Reader):
                         i1 = min(i0 + batch, nl)
                         out[k, i0:i1] = ds[self.ids[self.st_theta + i0:
                                                     self.st_theta + i1], st:end]
-                    np.sqrt(out[k], out=out[k])
         return out

@@ -19,14 +19,18 @@ class Tomo:
         the detector stays 1/n either way, so R and RT remain an exact adjoint
         pair and the sinogram *values* are unchanged -- only sampled more densely.
 
-        The detector bins with |f| >= 1/2 -- which only exist once nd > n, and
-        lie outside the padded FFT's Cartesian square -- are zero: the object
-        lives on the n grid, so it is band-limited to |f| < 1/2 and the
-        sinogram is the band-limited interpolation of the coarse one onto the
-        nd grid.  (Letting the gather index wrap instead, as ~/APS_PXM/tomo_usfft
-        does, models the object as a delta comb; at nd = 2n that makes the
-        gathered spectrum n-periodic and the sinogram a comb with every odd
-        detector sample exactly zero.  See the gather kernel.)
+        Detector bins whose Cartesian frequency (fr*cos, -fr*sin) falls outside
+        the padded FFT's square -- they only exist once nd > n -- are skipped
+        and read back as zero: the object lives on the n grid, so its spectrum
+        is the square |kx|, |ky| <= 1/2, and the sinogram is the band-limited
+        interpolation of the coarse one onto the nd grid.  The test is on the
+        Cartesian pair, not on |fr|, so the square's corners -- out to
+        |fr| = sqrt(2)/2 at 45 deg -- are kept.  (Letting the gather index wrap
+        instead, as ~/APS_PXM/tomo_usfft does, models the object as a delta
+        comb; at nd = 2n that makes theta = 0 and 90 read an n-periodic spectrum
+        and come out as combs with every odd detector sample exactly zero,
+        which backprojects to vertical and horizontal line artifacts.  See the
+        gather kernel.)
         """
         nd = n if nd is None else int(nd)
         if nd not in (n, 2 * n):
@@ -169,8 +173,10 @@ class Tomo:
             h = af * cp.sinc(f)
         elif filter_name == 'parzen':
             # Parzen (B-spline order-4) window applied to the ramp.
-            # u = 2|f| maps [0, 0.5] → [0, 1]
-            u = 2 * af
+            # u = 2|f| maps [0, 0.5] → [0, 1].  Note this is |f|, NOT af: af
+            # carries the ramp's own 4*nd gain, and feeding that to the window
+            # sent 2*(1-u)**3 to ~1e9 and made 'parzen' unusable at any real nd.
+            u = 2 * cp.abs(f)
             w = cp.where(u <= 0.5,
                          1 - 6*u**2 + 6*u**3,   # inner region
                          2*(1 - u)**3)            # outer region (tapers to 0 at Nyquist)

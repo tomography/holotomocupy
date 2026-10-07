@@ -11,6 +11,19 @@ Three reconstructions of the same sample are turned into three stacks:
     even  <-  ..._rec6_p0/checkpoints/checkpoint_<iter>.h5  projections 0,2,...,3998
     odd   <-  ..._rec6_p1/checkpoints/checkpoint_<iter>.h5  projections 1,3,...,3999
 
+--dir <set>=<suffix> points one set somewhere else, and --sets picks a subset,
+so any other arm can be extracted with the same code:
+
+    --sets full,even --iter 1280 --crop 256 --zcrop 128
+    --dir full=rec6_psf10_amp_binned
+    --dir even=rec6_psf10_amp_binned_p0
+    --out ..._rec6_results_binned_psf10
+
+The arm directories are NOT named to one rule -- the baseline truncated arm is
+rec6_binned / rec6_p0_binned / rec6_p1_binned, the psf arms are
+rec6_psf10_amp_binned / ..._binned_p0 / ..._binned_p1 -- which is why the
+suffix is spelled out per set instead of being built from an arm name.
+
 obj_re is stored [z, y, x] at 5056^3.  --crop trims that many pixels off each
 of the four y/x borders and --zcrop trims that many slices off the top and the
 bottom, so the defaults 768 and 256 leave 4544 slices of 3520 x 3520.  One TIFF
@@ -76,6 +89,15 @@ def main():
                    help='output root; one subdirectory per set')
     p.add_argument('--sets', default=','.join(SETS),
                    help='comma-separated subset of: ' + ','.join(SETS))
+    p.add_argument('--dir', action='append', default=[], metavar='SET=SUFFIX',
+                   help='point one set at a different reconstruction directory, '
+                        'as <set>=<suffix after --base>; repeatable.  The arm '
+                        'directories are not named to one rule -- the baseline '
+                        'truncated arm is rec6_binned / rec6_p0_binned / '
+                        'rec6_p1_binned but the psf arms are '
+                        'rec6_psf10_amp_binned / ..._binned_p0 / ..._binned_p1 '
+                        '-- so the suffixes are given explicitly rather than '
+                        'built from an arm name')
     p.add_argument('--part', default='obj_re',
                    help='dataset to extract (default obj_re, the real part)')
     p.add_argument('--zmax', type=int, default=None,
@@ -94,12 +116,26 @@ def main():
     if bad:
         sys.exit(f'unknown set(s): {",".join(bad)}; choose from {",".join(SETS)}')
 
+    dirs = dict(SETS)
+    for spec in a.dir:
+        tag, _, suffix = spec.partition('=')
+        tag, suffix = tag.strip(), suffix.strip()
+        if tag not in SETS:
+            sys.exit(f'--dir {spec}: unknown set {tag}; '
+                     f'choose from {",".join(SETS)}')
+        if not suffix:
+            sys.exit(f'--dir {spec}: expected <set>=<suffix>')
+        dirs[tag] = suffix
+
     # MPI is optional: without it this is rank 0 of 1 and does the whole job.
     try:
         from mpi4py import MPI
         comm = MPI.COMM_WORLD
         rank, size = comm.Get_rank(), comm.Get_size()
-    except ImportError:
+    except Exception:
+        # Not just ImportError: mpi4py imports fine but raises RuntimeError
+        # ("cannot load MPI library") on a workstation with no libmpi, which
+        # is exactly where the documented serial smoke test gets run.
         comm, rank, size = None, 0, 1
 
     import h5py
@@ -111,7 +147,7 @@ def main():
     # --- shapes, and the y/x window ------------------------------------------
     plan = []
     for tag in sets:
-        src = os.path.join(a.base + SETS[tag], 'checkpoints',
+        src = os.path.join(a.base + dirs[tag], 'checkpoints',
                            f'checkpoint_{a.iter}.h5')
         if not os.path.exists(src):
             sys.exit(f'missing checkpoint: {src}')

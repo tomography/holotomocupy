@@ -51,9 +51,7 @@ show twice as much at ω=0 as at ω=90, and both pairs agree (0.3σ). And
 
 For scale, on the 20 nm sibling the optimizer *invents* A_y ≈ +4.5 px and
 B_y ≈ −21.6 px of 4096 — around 2200 ppm of edge displacement, 8× the limit
-above. That is the physical cause of the empirical result in
-[`../fig09_shrink_vs_noshrink.py`](../fig09_shrink_vs_noshrink.py): noshrink is
-15–24 % better on every largedisp ladder tested, because there is no shrinkage
+above. That is the physical cause of the empirical result: noshrink is 15-24 % better on every largedisp ladder tested, because there is no shrinkage
 to fit and the term absorbs displacement the position refinement should own.
 
 Unlike the 20 nm folder there is no second ladder to compare against, so the

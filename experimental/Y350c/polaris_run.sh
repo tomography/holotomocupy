@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -8,11 +8,8 @@
 #PBS -N holotomo
 #PBS -j oe
 
-# --- user configuration ---
-CONFIG=config_step6.conf
-SCRIPT=step6.py
 # Software environment (modules + conda env). See the Polaris setup notes.
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 # --------------------------
 
 NNODES=$(wc -l < $PBS_NODEFILE)
@@ -45,11 +42,66 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 source "${HTC_ENV}"
 echo "python: $(which python)"
 
-# Fallback: ALCF-provided base conda + venv layered on top
-# module use /soft/modulefiles;  module load conda; conda activate base
-# CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
-# source "/home/vvnikitin/venvs/${CONDA_NAME}/bin/activate"
+# PBS can pin a host but cannot negate one, so a node that comes up with
+# cudaErrorDevicesUnavailable can only be filtered from inside the job.
+# Must run AFTER the env is sourced: the probe needs cupy.
+HOSTOPT=""
+if [ "${HEALTHCHECK:-1}" = "1" ]; then
+    GOOD="${SCRIPT_DIR}/nodes.good.${PBS_JOBID}"
+    bash "${rec_dir}/gpu_healthcheck.sh" "${GOOD}" "${NRANKS}" "${RUN_NODES:-1}" || { echo "ERROR: too few healthy nodes in this allocation; aborting."; exit 1; }
+    head -n "${RUN_NODES:-$(wc -l < "${GOOD}")}" "${GOOD}" > "${GOOD}.run"
+    NNODES=$(wc -l < "${GOOD}.run")
+    export NTOTRANKS=$(( NNODES * NRANKS ))
+    HOSTOPT="--hostfile ${GOOD}.run"
+    echo "Running on ${NNODES} healthy nodes  TOTAL_NUM_RANKS=${NTOTRANKS}"
+fi
 
-# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf"
-mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}"
-# mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf"
+# NFP probe retrieval -- OPT-IN.  Uncomment prb_file in config_step6.conf after.
+# echo "=== nfp START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf" || exit $?
+
+# THE RUN IS IN TWO PASSES, WITH step7 BETWEEN THEM.
+#
+#   PASS 1   steps15, then bin2 -> bin1.  No drift correction yet.
+#   step7    by hand, ONE GPU, no MPI:   python step7.py config_step6_bin1.conf
+#            writes correct_correct3D_extra.txt next to the configs.
+#   PASS 2   bin2 -> bin1 -> bin0, started FRESH so bin2 reads the correction.
+#
+# Only bin2 applies the file: it is the one level with start_iter=0, and
+# read_pos adds it to /exchange/cshifts_final there.  bin1 and bin0 resume
+# from checkpoints and inherit the corrected positions -- re-applying it would
+# double count.  find_latest_checkpoint returns None whenever start_iter=0, so
+# pass 2 does NOT need path_out emptied first; bin2 simply overwrites.
+#
+# Uncomment ONE pass per submission.
+
+# ---- PASS 1 ---------------------------------------------------------------
+# raw HDF5 -> HDF5, preprocess, shifts, binned data, Paganin+FBP.
+# start_step=5 in config_steps15.conf is enough if the 568 GB h5 is already
+# there and only nobj changed; start_step=1 reconverts everything.
+# echo "=== steps15 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+
+# # bin 2: 4x4  n=512   nobj=640   iters    0 -> 1024
+# echo "=== pass1 bin2 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+
+# # bin 1: 2x2  n=1024  nobj=1280  iters 1024 -> 1280
+# echo "=== pass1 bin1 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+
+# ---- step7, by hand, between the passes -----------------------------------
+#   cd <this dir> && python step7.py config_step6_bin1.conf
+# Reads checkpoint_1280.h5 from path_out, writes correct_correct3D_extra.txt
+# here.  Copy checkpoint_1280.h5 aside first if you want to compare against
+# the uncorrected result -- pass 2 overwrites it.
+
+# ---- PASS 2  (uncomment after step7) --------------------------------------
+# echo "=== pass2 bin2 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+#
+# echo "=== pass2 bin1 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+#
+# echo "=== pass2 bin0 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?

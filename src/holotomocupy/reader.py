@@ -151,7 +151,9 @@ class Reader:
                  st_theta, end_theta, ntheta,
                  ndist, nz, n,
                  paganin, rotation_center_shift, start_theta, bin,
-                 tomo_upsample=1):
+                 tomo_upsample=1, correct3d_extra=0,
+                 correct3d_extra_file='correct_correct3D_extra.txt',
+                 correct3d_bin=1):
         self.in_file   = in_file
         self.comm      = comm
         self.rank      = comm.Get_rank()
@@ -173,6 +175,10 @@ class Reader:
         # has, and both arms read the same datasets.  read_obj bins that init
         # down to the object grid.
         self.tomo_upsample = int(tomo_upsample)
+        # Step 7's drift refinement, added to the positions in read_pos.
+        self.correct3d_extra      = int(correct3d_extra)
+        self.correct3d_extra_file = correct3d_extra_file
+        self.correct3d_bin        = int(correct3d_bin)
 
         # Read acquisition parameters once and store as attributes
         with h5py.File(in_file, 'r', driver="mpio", comm=self.comm) as fid:
@@ -214,6 +220,14 @@ class Reader:
                 raise ValueError(
                     f"{obj_ds_re.name} is {nobj0} wide, too small for "
                     f"nobj={self.nobj} x tomo_upsample={ups} = {nread}")
+            if self.nzobj > nzobj0:
+                # Without this, stz goes negative and the h5py slice wraps
+                # round to the end of the dataset, handing back short or empty
+                # blocks -- a broadcast error deep in the read loop rather than
+                # a statement of what is actually wrong.
+                raise ValueError(
+                    f"{obj_ds_re.name} has {nzobj0} z slices, too few for "
+                    f"nzobj={self.nzobj}")
             stz  = nzobj0 // 2 - self.nzobj // 2
             stx  = nobj0  // 2 - nread // 2
             endx = nobj0  // 2 + nread // 2
@@ -263,10 +277,47 @@ class Reader:
         else:
             out[:] = cp.array(raw) if isinstance(out, cp.ndarray) else raw
 
+        # Positions and rotation_center_shift are offsets from the MIDDLE of
+        # the detector, and the rotation axis sits at (n-1)/2 at every level
+        # (see the gather kernel), so binning is a plain factor -- no
+        # half-pixel term.
         scale = np.float32(1.0 / 2**self.bin)
         out *= scale
-        out[..., 1] += np.float32(self.rotation_center_shift * scale + 0.5 * (scale - 1))
+        out[..., 1] += np.float32(self.rotation_center_shift * scale)
+        extra = self.read_correct3d_extra()
+        if extra is not None:
+            out += cp.array(extra) if isinstance(out, cp.ndarray) else extra
         return out
+
+    def read_correct3d_extra(self):
+        """Step 7's per-angle refinement as [ndist, local_ntheta, 2], or None.
+
+        Peter's layout -- columns (horizontal, vertical), one row per scan
+        angle plus the 180 deg repeat -- and his binned pixels, so the file
+        scales by correct3d_bin exactly as correct_correct3D.txt does.  A
+        path is resolved by config.py against the config's own directory.
+        """
+        if not self.correct3d_extra:
+            return None
+        path = self.correct3d_extra_file
+        if not os.path.exists(path):
+            if self.rank == 0:
+                logger.info(f'correct3D extra: no {os.path.abspath(path)}, '
+                            f'positions unchanged')
+            return None
+        raw = np.loadtxt(path)
+        idx = self.ids[self.st_theta:self.end_theta]
+        if raw.shape[0] <= idx.max():
+            raise ValueError(f'{path}: {raw.shape[0]} rows, need more than '
+                             f'{idx.max()} for this scan')
+        scale = np.float32(self.correct3d_bin / 2**self.bin)
+        s = raw[idx, ::-1].astype('float32') * scale          # (y, x), this bin
+        if self.rank == 0:
+            logger.info(f'correct3D extra: {os.path.abspath(path)}, '
+                        f'{raw.shape[0]} rows, x{self.correct3d_bin} -> bin '
+                        f'{self.bin} px:  y ptp {np.ptp(s[:, 0]):.4f}  '
+                        f'x ptp {np.ptp(s[:, 1]):.4f}')
+        return np.ascontiguousarray(np.broadcast_to(s, (self.ndist,) + s.shape))
 
     def read_shrink(self, out=None):
         """Read [ndist, local_ntheta, 2] shrink for this rank's theta-slice.
@@ -324,6 +375,15 @@ class Reader:
         Out layout is [ndist, local_ntheta, nz, n] (dist-major) so that per-dist
         slices `out[k]` are contiguous — matches how Rec consumes them in the
         outer-distance loop.
+
+        The values are the measured INTENSITY, exactly as step 4 wrote them.
+        This used to return the amplitude — it took the sqrt here — because
+        Rec.F0 compared amplitudes; F0 is now an intensity misfit
+        (1/N sum m (K|psi|^2 - d)^2), so the sqrt would only be undone.
+        read_ref still returns an amplitude, but not because F1 is an amplitude
+        misfit -- F1 is an intensity one too now.  PrbfitTerm squares `ref` at
+        use, so the array stays an amplitude and every seeding path
+        (read_ref, gen_sqrt_ref, disp_study.gen_ref) is left alone.
         """
         nz, n = self.nz, self.n
         local_ntheta = self.end_theta - self.st_theta
@@ -339,7 +399,6 @@ class Reader:
                 for i0 in range(0, local_ntheta, batch):
                     i1 = min(i0 + batch, local_ntheta)
                     out[k, i0:i1] = ds[self.ids[self.st_theta + i0:self.st_theta + i1], st:end]
-                np.sqrt(out[k], out=out[k])
         return out
 
     def read_ref(self, out=None):
@@ -378,7 +437,24 @@ class Reader:
                shrink is a unitless ratio. A checkpoint written before shrinkage
                became a variable has no /tp, in which case out_tp is left alone
                and rank 0 logs a warning.
+
+        NOTE the step-7 correction is applied ONCE, by read_pos, at the level
+        that starts fresh (start_iter=0 -- find_latest_checkpoint returns None
+        there whatever is on disk).  Levels that resume inherit it through the
+        checkpoint's /pos, so it must not be added again here or it would
+        double count.  The log line below records which case this is, because
+        the failure mode it replaces -- a rerun that silently changed nothing
+        -- is invisible otherwise.
         """
+        if self.correct3d_extra and os.path.exists(self.correct3d_extra_file):
+            if self.rank == 0:
+                logger.info(
+                    f'correct3D extra: {os.path.abspath(self.correct3d_extra_file)} '
+                    f'not re-applied at this level -- resuming, so the '
+                    f'checkpoint\'s positions already carry it IF the ladder '
+                    f'was started fresh after step 7.  Only a start_iter=0 '
+                    f'level reads it from cshifts_final.')
+
         # --- infer scale and probe on rank 0, broadcast ---
         prb_np = np.empty((self.ndist, self.nz, self.n), dtype='complex64')
         if self.rank == 0:
@@ -543,7 +619,6 @@ class Reader:
 
         # Stored on disk as [ntheta, ndist, 2]; transpose to [ndist, local_ntheta, 2].
         pos_up = np.ascontiguousarray(pos.transpose(1, 0, 2)) * scale
-        pos_up[..., 1] += np.float32(0.5 * (scale - 1))
         if out is None:
             out = cp.array(pos_up)
         else:

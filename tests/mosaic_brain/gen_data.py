@@ -247,7 +247,6 @@ for t, name in enumerate(tile_names):
 # Positions on the generation grid, via exactly the transform Reader.read_pos
 # applies, so reading the file back at this bin reproduces them.
 pos_all = cshifts * np.float32(scale)
-pos_all[..., 1] += np.float32(0.5 * (scale - 1))
 pos_all = np.ascontiguousarray(pos_all.transpose(1, 0, 2))   # [ndist, ntheta, 2]
 
 theta_deg = (np.arange(args.ntheta, dtype='float32')
@@ -316,7 +315,7 @@ rargs = SimpleNamespace(
     error_step              = -1,
     start_iter              = 0,
     comm                    = comm,
-    # gen_sqrt_data touches only vars / data / proj_tmp.  'gen' tells
+    # gen_data touches only vars / data / proj_tmp.  'gen' tells
     # Rec.alloc_arrays to skip the gradient and conjugate-direction buffers --
     # two more obj-sized and two more proj-sized pinned slabs, plus etas['obj'] --
     # so the run never peaks above what the lines above report.  Clearing
@@ -360,7 +359,7 @@ else:
 
 # obj_scale multiplies the whole volume.  The sample file carries arbitrary
 # grey levels, so this is what sets the projected phase excursion; the
-# "projected phase" line printed after gen_sqrt_data is the thing to tune it
+# "projected phase" line printed after gen_data is the thing to tune it
 # against (a few rad to a few tens of rad is well conditioned).
 if args.obj_scale != 1.0:
     info(f'scaling the object by {args.obj_scale:g}')
@@ -462,7 +461,7 @@ with contextlib.ExitStack() as stack:
                  shape=(args.ntheta, n, n), dtype='float32', chunks=(1, n, n))
              for k in range(ndist)]
     cl.vars['pos'][:] = pos_all[:, st_th:end_th]
-    cl.gen_sqrt_data(cl.vars, cl.data)             # |y|, so intensity is |y|**2
+    cl.gen_data(cl.vars, cl.data)             # intensity K|y|^2, as read back
     info(f'generated in {time.time()-t_start:.0f}s, writing')
 
     # The projected phase actually seen by exp(1j*proj), measured rather than
@@ -488,7 +487,7 @@ with contextlib.ExitStack() as stack:
     for k in range(ndist):
         for i0 in range(0, end_th - st_th, nrow):
             i1 = min(i0 + nrow, end_th - st_th)
-            dsets[k][st_th + i0:st_th + i1] = cl.data[k, i0:i1]**2
+            dsets[k][st_th + i0:st_th + i1] = cl.data[k, i0:i1]
         if (k + 1) % ndist_t == 0:
             info(f'  wrote tile {k // ndist_t + 1}/{ntiles}  '
                  f'({time.time()-t_start:.0f}s elapsed)')

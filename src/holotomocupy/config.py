@@ -27,6 +27,11 @@ class _Cfg:
         self._source = source
         self._here = here
 
+    @property
+    def here(self):
+        """Directory holding the config file."""
+        return self._here
+
     def _conv(self, fn, key, fallback):
         if key not in self._c:
             if fallback is _MISSING:
@@ -84,6 +89,66 @@ def get_list(c, key, cast=str, sep=","):
     return [cast(x.strip()) for x in s.split(sep) if x.strip()]
 
 
+_MODELS = ('intensity', 'amplitude')
+
+
+def _parse_model(cfg):
+    """The data-misfit model: 'amplitude' (default) or 'intensity'.
+
+    Both compare the SAME forward intensity K|psi|^2 -- where K is the one
+    Gaussian of psf_sigma -- against the same measured intensity d.  They differ
+    only in the space the comparison is made in.  With a = sqrt(K|psi|^2):
+
+        intensity   F0 = 1/N sum W (a^2 - d  )^2
+        amplitude   F0 = 1/N sum W (a   - sqrt(d))^2
+
+    so psf_sigma is orthogonal to this knob and works in both; amplitude at
+    psf_sigma=0 is exactly the misfit the solver used before it moved to
+    intensity.
+
+    Which is right is a noise question.  sqrt is the variance-stabilizing
+    transform of the Poisson distribution, so under photon-counting noise the
+    residuals of the AMPLITUDE model have constant variance and it is the
+    correctly weighted least squares; under additive/read-dominated noise that
+    is true of the INTENSITY model instead.  The two are related by
+    (a^2 - d) = (a - sqrt(d))(a + sqrt(d)), i.e. the intensity misfit is the
+    amplitude misfit with an extra per-pixel weight (a + sqrt(d))^2 ~ 4d, which
+    is exactly the Poisson variance -- it over-weights bright pixels by their
+    own intensity.  On noiseless, exactly-modelled data both have the same
+    global minimum.
+
+    Practical consequences, all from that ~4d factor (data are flat-field
+    normalized, so d ~ 1 and the factor is ~4):
+
+      * err is ~4x SMALLER under amplitude and the two are not comparable.
+      * lam_laplacian must be divided by ~4 when switching to amplitude.  It
+        weighs a pure object penalty, which does not care what space the data
+        misfit lives in, against an F0 that just shrank ~4x -- an unscaled lam
+        would quietly be a 4x heavier regularizer.
+      * lam_prbfit, by contrast, CARRIES OVER UNCHANGED.  PrbfitTerm follows
+        this same knob, so its residual is amplitude-type exactly when F0 is and
+        shrinks by the same ~4; the ratio it multiplies is already invariant.
+        That is why it was tied to the knob rather than pinned to intensity.
+      * rho is a ratio between variable blocks and the F0 part of every block
+        rescales together, so rho carries over unchanged once the lam's do.
+      * amplitude divides by a and by a^3, so unlike intensity it needs a floor
+        (Rec._AMP_FLOOR) and can stiffen where the model predicts near-zero.
+    """
+    # DEFAULT CHANGED 2026-10-03: amplitude, not intensity.  Measured on the
+    # synthetic pair (see experimental/README), amplitude needs ~2.4x fewer
+    # iterations purely from conditioning, and it is the correctly weighted
+    # least squares under photon-counting noise.  Every config that pins
+    # model= explicitly is unaffected; a config that does not now gets
+    # amplitude, and its lam_laplacian wants dividing by ~4 (see above) and
+    # its err is ~4x smaller, so it is NOT comparable with that config's own
+    # older runs.
+    model = cfg.str("model", fallback="amplitude").strip().lower()
+    if model not in _MODELS:
+        raise ValueError(f"{cfg._source}: model must be one of {_MODELS}, "
+                         f"got {model!r}")
+    return model
+
+
 def parse_args(config_file):
     """Config for the main reconstruction (step6.py)."""
     cfg = _load(config_file)
@@ -111,6 +176,18 @@ def parse_args(config_file):
     args.ndist       = cfg.int("ndist")
     args.paganin     = cfg.int("paganin")
     args.mask        = cfg.float("mask")
+
+    # Detector PSF: one Gaussian on the detector intensity, sigma in BINNED
+    # detector px.  Per-bin, so halve it at each step of the ladder.
+    args.psf_sigma = cfg.float("psf_sigma", fallback=0.0)  # binned detector px
+
+    # Which space the data misfit is measured in, 'intensity' (default, the
+    # historical behaviour) or 'amplitude'.  Orthogonal to psf_sigma: both
+    # models blur the model intensity with the same K.  See _parse_model --
+    # in particular that lam_laplacian must be divided by ~4 when switching to
+    # amplitude while lam_prbfit carries over unchanged, and that err is not
+    # comparable across the two.
+    args.model = _parse_model(cfg)
 
     args.lam_prbfit    = cfg.float("lam_prbfit")
     args.lam_laplacian = cfg.float("lam_laplacian", fallback=0.0)
@@ -162,11 +239,33 @@ def parse_args(config_file):
 
     args.rotation_center_shift = cfg.float("rotation_center_shift")
     args.bin           = cfg.int("bin")
-    # Shift interpolation inside Rec: 'cubic' (B-spline, 4x4 taps, mirrored
-    # edges) or 'fft' (Fourier shift theorem, exact for a band-limited object
-    # but PERIODIC -- see ShiftFFT).  'fft' removes the stencil error that
-    # biases the position gradient, and is what a scan reconstructed as
-    # near-field ptychography (rho[pos] > 0) wants.
+
+    # Step 7's answer: a per-angle shift ADDED to the positions read from the
+    # h5, so a refit only costs a step-6 rerun.  Absent file = no-op.
+    #
+    # A relative path resolves against the CONFIG's directory, not the cwd:
+    # step7.py writes the file next to the config, but polaris_run.sh runs
+    # step6 from the PARENT directory, so a cwd-relative default silently
+    # missed it and the rerun changed nothing.
+    #
+    # NOTE correct3d_bin is a FACTOR (1, 2, 4 = raw px per file px), NOT a
+    # level like `bin`, and deliberately so: it must match the binning ESRF
+    # stamped on the file, which steps15 cross-checks against
+    # esrf_meta.bin_from_pixelsize (a physical factor), and 0 is already taken
+    # as "derive it from <pfile>_rec_.info".  read_pos scales by
+    # correct3d_bin / 2**bin.
+    args.correct3d_extra      = cfg.int("correct3d_extra", fallback=1)
+    _extra_file = cfg.str("correct3d_extra_file",
+                          fallback="correct_correct3D_extra.txt")
+    args.correct3d_extra_file = (_extra_file if os.path.isabs(_extra_file)
+                                 else os.path.join(cfg.here, _extra_file))
+    args.correct3d_bin        = cfg.int("correct3d_bin", fallback=1)
+    # Shift interpolation: 'cubic' (B-spline, 4x4 taps) or 'fft' (Fourier
+    # shift theorem).  'cubic' is the default HERE, unlike step 0: a
+    # multi-distance scan has magnification != 1 at every plane but the
+    # first, so 'fft' takes the chirp-z on nearly every call -- 7-30x slower
+    # and 8-16x the scratch (tests/performance/bench_shift.py).  Step 0 is
+    # single-distance, m == 1, a plain phase ramp, and defaults to 'fft'.
     args.shift_type    = cfg.str("shift_type", fallback="cubic")
     args.log_level     = cfg.str("log_level", fallback="WARNING")
     args.energy        = cfg.float("energy", fallback=None)
@@ -217,6 +316,23 @@ def parse_args_step0(config_file):
     args.rho             = cfg.list("rho", float)
     args.log_level       = cfg.str("log_level", fallback="INFO")
 
+    # Detector PSF: one Gaussian on the detector intensity, sigma in detector
+    # px of the grid the data is on -- unbinned for NFP, no bin factor.
+    args.psf_sigma = cfg.float("psf_sigma", fallback=0.0)   # detector px
+    # Data-misfit model, 'amplitude' (default) or 'intensity'; see _parse_model.
+    # Orthogonal to psf_sigma -- both models blur the model intensity with K.
+    args.model = _parse_model(cfg)
+    # Photon energy in keV.  Optional: unset (default) means take it from the
+    # scan metadata, which is what every step0.py did before this knob.  Set it
+    # to override -- the recorded value is the monochromator setpoint and is
+    # worth sweeping when the probe comes out with the wrong fringe spacing.
+    args.energy = cfg.float("energy", fallback=None)
+    # Shift interpolation: 'fft' (Fourier shift theorem, the default -- the
+    # B-spline stencil error biases the position gradient) or 'cubic'.  'fft'
+    # is PERIODIC, so the object grid must clear n + 2*max|pos|, which
+    # step0.py's nobj already rounds up to a multiple of 32.
+    args.shift_type = cfg.str("shift_type", fallback="fft")
+
     return args
 
 
@@ -235,10 +351,35 @@ def parse_args_step0_nx(config_file):
     args.checkpoint_step = cfg.int("checkpoint_step", fallback=-1)
     args.error_step      = cfg.int("error_step",      fallback=32)
     args.rho             = cfg.list("rho", float)
+    # Optional rho tuning, as in parse_args: False (default) -> args.rho is
+    # used as-is; True -> RecNFP first coordinate-searches rho[prb], then
+    # rho[pos], around args.rho with silent rho_estimate_niter-iteration
+    # trials.  rho[proj] is the reference scale and is left alone, exactly as
+    # rho[obj] is in the 3-D search.  See RecNFP.estimate_rho_coord.
+    args.estimate_rho       = cfg.bool("estimate_rho",       fallback=False)
+    args.rho_estimate_niter = cfg.int ("rho_estimate_niter", fallback=16)
+    # -1 (default) keeps the trials silent; N > 0 logs the error every N
+    # iterations inside each trial, the only way to tell a slow descent from a
+    # first-step blow-up.
+    args.rho_trial_error_step = cfg.int("rho_trial_error_step", fallback=-1)
     args.log_level       = cfg.str("log_level", fallback="INFO")
-    # Shift interpolation inside RecNFP: 'cubic' (B-spline, mirrored edges) or
-    # 'fft' (Fourier shift theorem, exact but periodic).  See ShiftFFT.
-    args.shift_type      = cfg.str("shift_type", fallback="cubic")
+
+    # Detector PSF: one Gaussian on the detector intensity, sigma in detector
+    # px of the grid the data is on -- unbinned for NFP, no bin factor.
+    args.psf_sigma = cfg.float("psf_sigma", fallback=0.0)   # detector px
+    # Data-misfit model, 'amplitude' (default) or 'intensity'; see _parse_model.
+    # Orthogonal to psf_sigma -- both models blur the model intensity with K.
+    args.model = _parse_model(cfg)
+    # Photon energy in keV.  Optional: unset (default) means take it from the
+    # scan metadata, which is what every step0.py did before this knob.  Set it
+    # to override -- the recorded value is the monochromator setpoint and is
+    # worth sweeping when the probe comes out with the wrong fringe spacing.
+    args.energy = cfg.float("energy", fallback=None)
+    # Shift interpolation: 'fft' (Fourier shift theorem, the default -- the
+    # B-spline stencil error biases the position gradient) or 'cubic'.  'fft'
+    # is PERIODIC, so the object grid must clear n + 2*max|pos|, which
+    # step0.py's nobj already rounds up to a multiple of 32.
+    args.shift_type = cfg.str("shift_type", fallback="fft")
 
     return args
 

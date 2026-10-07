@@ -21,6 +21,32 @@ the raw data on 2026-09-01 or carried over from a named sibling and marked so.
 > [`esrf_layout.py`](esrf_layout.py); nothing in the raw tree has to be copied
 > or renamed. See **Where the pixels are** below.
 
+> ## !! SUPERSEDED IN PART BY THE 2026-09-27 ESRF DROP
+>
+> ESRF has since converted this scan to EDF and run Peter's octave pipeline on
+> it.  The drop landed on eagle on **2026-09-27** and carries, for the first
+> time for this scan: `correct_motion.txt`, `correct_correct3D.txt` (+ the
+> vertical-only `_v` variant, whose zeroed column is the HORIZONTAL one --
+> file col0, as on AtomiumS1), `quali.mat`, `reference_motion.mat`,
+> `shrink_list.mat`, `shapp.mat`, a PyHST `.par` and a full `naburec/`.
+> The copy finished 2026-09-27 18:02; everything below is measured against it.
+> **The config files have been updated; this README has NOT been
+> rewritten.**  What it still says that is now wrong:
+>
+> | README says | now |
+> |---|---|
+> | `rotation_center_shift` **+9.80** (retakes) | **+15.47**, from ESRF's own `naburec/nabu_final_cm.conf` (`rotation_axis_position = 1031.235375` on the 2048-wide `_rec_.nx`, `(1031.235375 - 1023.5) x 2`).  The retake estimate +9.82 +- 0.41 stands as an independent measurement 5.7 px away; ESRF's own number wins, as it did on AtomiumS1_HT.  The `.par`'s 1023.931433 is stale, again exactly as on AtomiumS1_HT; on the 1-based PyHST centre 1024.5 it gives **-1.14**, 16.6 px away. |
+> | `correct_motion.txt` "estimated here" | ESRF's own file, in RAW detector px (amplitude test slope 1.00005 / 1.00001 against the random `.txt`), so `correct_motion_bin` stays unset.  Validated against `reference_motion.mat`'s `ref_v`/`ref_h` to 5e-7. |
+> | `correct3D` "borrowed from the AtomiumS1 FT scan" | ESRF's own file.  `correct3d_bin` stays **2**.  The retired transplant was good to ~1 px rms (corr 0.984 / 0.956, max abs diff 2.42 px). |
+> | shrinkage "none - measured as absent" | `shrink_list.mat` EXISTS (row 0: h 4356 ppm, v 6221 ppm) and **Peter applied it** -- `<pfile>_rec_.info` has `correct_shrink = 2`.  So `rho[tp]=0` freezing tp at ESRF's value is what reproduces his reconstruction, not a bug.  Our own retake bound (2 sigma <= ~530 ppm) still says those numbers are grid noise from `find_shrink.m`'s 5000 ppm quantum -- that is a disagreement with ESRF, not a reason to drop the file.  `shapp.mat` is the same shrinkage as a per-angle ramp saturating at exactly those two values; it is non-linear (a straight-line fit leaves 9.4% / 6.8% of the range as residual) where `init_tp_from_shrink()` ramps linearly, so we match his endpoints but not his path. |
+> | "never converted to EDF, Peter's pipeline never run" | both are now false; the `nxvds` layout still describes the RAW tree. |
+>
+> **Re-copied unnested and verified complete on 2026-09-27 18:02**: 12066 EDFs,
+> `quali.mat`, `shrink_list.mat`, a populated `naburec/`, and
+> `<pfile>/projections/` with the NXtomo and the +-300 px random `.txt`.
+> Everything steps 1-5 and step 0 need is on disk.  See
+> [Matching Peter's final reconstruction](#matching-peters-final-reconstruction).
+
 | | ctxl FT (here) | `../ctxl_HT_4K_RD300_007p5nm` | `../Y350a_largedisp_006nm` |
 |---|---|---|---|
 | layout | **nxvds (2026, no EDF)** | ewoks (2026, EDF) | bliss (2025) |
@@ -30,12 +56,153 @@ the raw data on 2026-09-01 or carried over from a named sibling and marked so.
 | voxel size | 7.500 nm | 7.500 nm | 6.000 nm |
 | random displacement | ±300 px | ±300 px | ±300 px |
 | `nobj` | **4800** | 5056 | 4800 |
-| `rotation_center_shift` | **+9.80 px** (measured here) | −15.77 px (nabu) | −37.50 px |
+| `rotation_center_shift` | **+15.47 px** (ESRF nabu; was +9.80) | −15.77 px (nabu) | −37.50 px |
 | `paganin` | **60** | 60 | 40 |
 | `rhapp` | **N/A — one plane** | yes | N/A |
-| `correct_motion.txt` | **estimated here**, checked in | yes, from ESRF | estimated locally |
-| shrinkage | none — *measured* as absent | none — measured as absent | none — measured as absent |
+| `correct_motion.txt` | **from ESRF** (2026-09-27; was estimated here) | yes, from ESRF | estimated locally |
+| shrinkage | *measured* as absent; ESRF's `shrink_list.mat` disagrees | none — measured as absent | none — measured as absent |
 | probe | **measurable, `step0.py` works** | not possible (no RAW_DATA) | not wired up |
+
+## `holotomocupy.esrf_meta` -- written 2026-09-27
+
+`steps15.py:43` is `from holotomocupy import esrf_meta`.  The module had never
+existed; it now does, at `src/holotomocupy/esrf_meta.py`.  It reads back what
+ESRF's own pipeline recorded about a scan and never raises on a missing or
+malformed file -- every function returns `None` or a note instead.
+
+| function | called from | returns |
+|---|---|---|
+| `drop_dirs(path, pfile)` | -- | `<pfile>_`, `<pfile>_1_`, plus one nested level |
+| `find_drop_file(path, pfile, name)` | :657 | `(abspath or None, note)` |
+| `bin_from_pixelsize(px, vox, tol=0.02)` | :604, :610, :678, :685 | `(bin or None, why)` |
+| `rec_info(path, pfile)` | :543 | `<pfile>_rec_.info` as a dict, incl. `pixelsize_m`, `width` |
+| `mat_pixelsize(matpath)` | :542 | `pixelsize` out of an Octave ASCII `.mat`, in m |
+| `reference_motion(path, pfile)` | :544 | `ref_v` / `ref_h` / `reference_plane_1based` / `ref_dist` |
+| `nabu_axis(path, pfile, voxelsize)` | :206 | `{'rcs','source','note','candidates'}`, raw px |
+| `pyhst_axis(path, pfile, voxelsize)` | :207 | same shape, from `<pfile>_rec_.par` |
+
+Only **`find_drop_file` is load-bearing** -- without it `correct3d_shifts`
+silently becomes zeros.  The other seven are diagnostics, because
+`rotation_center_shift`, `rhapp_bin`, `correct3d_bin` and `ref_dist` are all
+pinned in the config.  They are worth having anyway: they are what caught the
+stale `.par` here and settled the AtomiumS1_HT axis.
+
+**Centre convention, settled by validation.**  nabu's centre is `(N-1)/2`
+(0-based), PyHST's is `(N+1)/2` (1-based); `rotation_center_shift =
+(axis_pos - centre) x bin_factor`, used as printed, never negated.  Validated
+against four independent ESRF truths, all reproduced exactly:
+
+| scan | nabu | PyHST `.par` |
+|---|---|---|
+| ctxl_FT (this one) | **+15.47** (7 confs span 0.114) | -1.14, stale |
+| ctxl_HT | -15.77 on the pi/2-padded 3216-wide grid | -18.87, recorded |
+| AtomiumS1 FT | +10.74 | -- |
+| AtomiumS1_HT | -29.48 | +44.20, 73.7 px stale |
+
+`load_octave_text_mat` and `load_shrink_from_mats` already existed in
+`src/holotomocupy/reader.py` and do the `.mat` parsing; `esrf_meta` is the
+drop-layout knowledge on top.
+
+## `esrf_layout.py` -- written 2026-09-27, third flavour `nxvds`
+
+`steps15.py:51` (`Layout`) and `step0.py:44` (`NxFrames`) had no file behind
+them; both now come from this folder's own `esrf_layout.py`.  It is
+[../ctxl_HT_4K_RD300_007p5nm/esrf_layout.py](../ctxl_HT_4K_RD300_007p5nm/esrf_layout.py)
+verbatim -- the `read_info` / `read_nx_geometry` helpers diff clean against it
+-- plus a third flavour and the frame readers `steps15.py` step 1 needs.
+
+**This scan has BOTH.**  `<pfile>_1_/` holds 12003 projection EDFs, 40 flats
+and 20 darks, *and* `<pfile>/projections/<pfile>_0001.nx` is an NXtomo whose
+`instrument/detector/data` is a virtual dataset over **124 raw balor HDF5
+files** under `RAW_DATA/`.  When a virtual NXtomo is present the flavour is
+`nxvds` and the readers go through it; a scan with the NXtomo but no VDS stays
+`ewoks` and reads EDFs, so the same file still drives ctxl_HT unchanged.
+
+| added | why |
+|---|---|
+| `NxFrames` | rebases the 124 virtual sources onto our tree; `../AtomiumS1/nx_frames.py` is a standalone copy |
+| `_nx_is_virtual` | picks `nxvds` vs `ewoks`; False on an unreadable `.nx`, so a half-copied drop degrades to EDF |
+| `frame_shape(k)` | `steps15.py:175`, without reading a frame |
+| `read_proj` / `read_refs` / `read_darks` | `steps15.py:297-317`; VDS for `nxvds`, fabio otherwise |
+| `nx(k)` / `_flat_blocks(k)` | cached `NxFrames`; flats split into start/end batches by contiguous `image_key == 1` runs |
+| `angles(k)` | `sample/rotation_angle` at `image_key == 0` for `nxvds`, `angles_file.txt` otherwise |
+
+**Verified against the real drop, 2026-09-27.**  `flavour=nxvds`, ndist 1,
+ntheta 12000, nref 20, ndark 20, frame 4096x4096, voxelsize 7.5 nm,
+`info_check` clean.  All 124 virtual sources resolve -- **0 missing** -- and
+the VDS is **bit-for-bit identical to the EDFs** at projections 0 / 6000 /
+12002, flat 0 and dark 0.  `angles` matches `angles_file.txt` to 5e-7 deg and
+is monotonic over the 12000 scan angles; the trailing 180 / 90 / 0 are the
+post-scan retakes.
+
+`nx(k)` **raises** when any virtual source is unresolved rather than letting
+HDF5 serve its fill value: an unrebased source reads as zeros with no error
+and no warning, and every downstream step would run to completion on them.
+
+## State on eagle, and what has to be recomputed
+
+`<path_out>/` was last written **2026-09-08**, before this drop:
+
+| dataset | there? | still valid? |
+|---|---|---|
+| `pdata0`, `pdata0_0/_1/_2` | yes | **yes** -- at `ndist=1` step 4 only bins `pdata0`; the shifts enter `srdata` (a local, never written) and the padding, not the output |
+| `/exchange/cshifts_final` | yes | **no** -- pre-drop `correct_motion.txt` / `correct_correct3D.txt` |
+| `/exchange/shrink` | yes, identically **0** | **no** -- `shrink_list.mat` now exists |
+| `_obj.h5:/exchange/obj_init_re60_2`, `obj_init_imag60_2` | yes | **no** -- FBP'd with the old shifts and the old axis.  bin 1 / bin 0 inits were never written, which is fine: the ladder upsamples from the bin-2 checkpoint |
+| `_proj.h5:/exchange/proj_bin0`, `proj_bin2` | yes | diagnostic only |
+| `_srdata.h5:/exchange/srdata_bin2` | yes | **no** |
+
+So `start_step` moves 5 -> **3**.  The axis is the one exception that would
+NOT have needed it: `reader.read_pos` adds `rotation_center_shift` when step 6
+runs (`reader.py:276`), so +15.47 reaches step 6 from the config directly.
+There is no `stop_step`, so step 3 drags step 4 along -- ~2.1 TB of I/O that
+changes nothing at `ndist=1`.
+
+## Matching Peter's final reconstruction
+
+Peter's FINAL rec is `naburec/nabu_final_cm.conf` and its `_even` / `_odd`
+twins.  They drove the only three full-recon slurm jobs that ever ran on this
+scan (36740674 / 5 / 6), producing `<pfile>_rec_cm_.vol`, `_rec_cm_even_.vol`
+and `_rec_cm_odd_.vol`.  `nabu_final.conf` points at a `.../correct.txt` that
+does not exist anywhere in the drop and never ran -- ignore it.
+
+The corrections are split across two stages, which is the thing to get right:
+
+**Stage 1, Peter's octave pipeline** (`ht_ctxl_FT_..._0003.m` -> the `_rec_`
+EDFs -> `nxtomomill edf2nx` -> `<pfile>_rec_.nx`, 12001 x 2048 x 2048 float32,
+15 nm).  This is where the big shifts go.  `<pfile>_rec_.nx`'s
+`sample/x_translation`, `y_translation` and `z_translation` are **all exactly
+zero**, and nabu's only per-angle shift input is the +-21 px
+`correct_correct3D.txt` -- so the +-300 px random walk and the drift are
+already baked into the `_rec_` frames, via `correct_motion.txt`.  Same stage
+applies the shrinkage (`correct_shrink = 2`, i.e. `find_shrink.m` trials ->
+`shapp.mat`) and Paganin at `delta_beta = 60`, and bins 2x2.
+
+**Stage 2, nabu FBP** on that `.nx`: `binning = 1`, `binning_z = 1`,
+`rotation_axis_position = 1031.235375`, `axis_correction_file =` (empty),
+`translation_movements_file = ../correct_correct3D.txt` -- the FULL file, both
+columns, **not** the `_v` variant.  The even/odd twins differ only by
+`projections_subsampling = 2:0` / `2:1`.
+
+Term by term, against what this folder does:
+
+| term | Peter | here | match |
+|---|---|---|---|
+| +-300 px random walk | inside `correct_motion.txt`, applied to the EDFs | `random_shifts`, read from `projections/*.txt` | yes |
+| drift | the rest of `correct_motion.txt` | `motion_shifts = correct_motion/mag - random_shifts`, so the walk is not counted twice | yes |
+| `rhapp` | not used (ndist=1) | `rhapp.mat` absent -> zeros | yes |
+| shrinkage | `shapp.mat`, a per-angle ramp saturating at `shrink_list.mat` row 0 (h 4356, v 6221 ppm) | `init_tp_from_shrink()` ramps LINEARLY to the same endpoints; `rho[tp]=0` holds it | endpoints yes, path approximate |
+| 3-D residual | `correct_correct3D.txt`, full, on the 15 nm grid | same file, `correct3d_bin=2` | yes |
+| rotation axis | 1031.235375 on 2048 px | `rotation_center_shift=+15.47` raw px | yes |
+| delta/beta | 60 | `paganin=60` | yes |
+| half-sets | `projections_subsampling = 2:0` / `2:1` | `ntheta=6000` + `start_theta=0` / `1` | yes |
+
+**No config value needs changing.**  The single real difference is the
+shrinkage *path*: Peter's ramp is non-linear (a straight-line fit through
+`shapp.mat` leaves 9.4% vertical / 6.8% horizontal of the range as residual),
+ours is linear to the same endpoint.  `Rec` has no richer tp model, and with
+`rho[tp]=0` the term is frozen either way, so the residual is a fixed
+sub-pixel warp, not a drift.
 
 ## Which scan
 
@@ -117,16 +284,25 @@ about what that means.
 | `correct_motion.txt` | **not provided by ESRF** — measured here, checked in as [`correct_motion.txt`](correct_motion.txt) |
 | `correct3D` | **borrowed from the AtomiumS1 FT scan** — ESRF produced none for this scan, so `<pfile>_0003_/correct_correct3D.txt` is Peter's `Atomium_S1_FT_4K_RD300_004p5nm_0001_` file copied row for row and scaled by 4.5/7.5 = 0.6. Same 12001-angle grid, so no interpolation. See [Borrowed `correct_correct3D.txt`](#borrowed-correct_correct3dtxt) below. |
 
+`correct_correct3D_extra.txt` is **ours and no longer a step-3 input**: it is
+written by [`step7.py`](step7.py) into this directory and added to the
+positions by step 6, so refining it costs a step-6 rerun and not a steps15
+one. Same columns, same 12001 rows and the same binned pixels as Peter's
+file, so one `correct3d_bin=2` covers both. It exists because the `correct3D`
+above is borrowed and only good to ~1 px rms. `correct3d_extra=0` in
+`config_step6_*.conf` ignores the file without deleting it, for the
+with/without pair.
+
 **`correct_motion.txt` REPLACES the random displacement, it does not add to
 it.** Step 3 computes
 
 ```
 motion_base  = raw_motion / norm_mag[ref] - random_shifts[:, ref]
-shifts_final = random + rhapp + motion_base + correct3d
+shifts_final = random + rhapp + motion_base + (correct3d + correct3d_extra)
 ```
 
 With one plane (`norm_mag[0] = 1`, `ref_dist = 0`) and no rhapp this telescopes
-to `shifts_final = raw_motion + correct3d`. So the file must hold the random
+to `shifts_final = raw_motion + correct3d + correct3d_extra`. So the file must hold the random
 displacement **plus** the drift, in raw detector pixels. `estimate_motion.py`
 writes exactly that; the same arrangement is used in `../Y350a_largedisp_006nm`.
 
@@ -313,7 +489,16 @@ two frames. After steps 1–5, run
 `python step5_center_sweep.py config_steps15.conf` on the FBP volume and update
 all four configs if it disagrees.
 
-## Shrinkage — measured, and absent
+## Shrinkage — measured here as absent, but ESRF's value is what we use
+
+> **2026-09-27:** the drop brought `shrink_list.mat` (row 0: h 4356 ppm,
+> v 6221 ppm) and Peter applied it (`<pfile>_rec_.info`: `correct_shrink = 2`).
+> `load_shrink_from_mats` therefore no longer returns zeros, and `rho[tp]=0`
+> freezes tp on ESRF's ramp rather than on nothing.  That is deliberate -- it
+> is what reproduces his final rec.  The measurement below still says those
+> numbers are indistinguishable from zero at our noise level; treat it as a
+> disagreement with ESRF that costs a fixed sub-pixel warp, not as a reason to
+> delete the file.  See [Matching Peter's final reconstruction](#matching-peters-final-reconstruction).
 
 `python estimate_shrink.py config_steps15.conf --grid 5`, all 25 blocks fitting
 at every crop:
@@ -378,7 +563,12 @@ The HT folder cannot retrieve a probe: its NFP virtual datasets point into a
 `NxFrames`, verified locally: `missing = []`, 2 sources, dark mean 99.8, NFP
 frame means ≈888, geometry identical to the projection scan (z1 6.163535 mm,
 voxel 7.49999578 nm, mag 196.80×), positions y [−99.0, +102.0] px /
-x [−106.9, +99.1] px → `pos_range` 115 → `nobj` 4352.
+x [−106.9, +99.1] px → `pos_range` 115 → `nobj` 4352.  The piezo positions
+come from `sample/x_translation` / `y_translation` of that NXtomo (mm), not
+from a PCIe header as in the 2025 bliss route.  Some ESRF trees also carry a
+`<pfile>_NFP_after_0001`; this scan wrote only `_before` — point `nx_file` at
+the other one to compare.  `rho` in `config_step0.conf` is copied from
+`../Siemens/config_step0.conf`, the only other NXtomo NFP config in the tree.
 
 [`step0.py`](step0.py) here is `../Siemens/step0.py` (which already speaks
 NXtomo, via `parse_args_step0_nx` and `read_nxtomo_meta`) with the direct
@@ -394,25 +584,49 @@ Until then step 6 starts from a flat probe and refines it (`rho[1] = 0.05`).
 Bins 1 and 0 inherit the probe from the previous level's checkpoint, so
 `prb_file` only ever goes in the bin-2 config.
 
+## Step 7 — refining the per-angle drift
+
+[`step7.py`](step7.py) re-projects a step-6 checkpoint and searches for the
+per-angle shift that minimises the entropy of the FBP. One GPU, no MPI:
+
+```bash
+python step7.py config_step6_bin2.conf --dry-run      # geometry and units
+python step7.py config_step6_bin2.conf                # ~20 min
+```
+
+It writes `correct_correct3D_extra.txt` into this directory, in Peter's layout
+and binned pixels. Step 6 adds it to the positions it reads
+(`correct3d_extra=1` in `config_step6_*.conf`), so the next reconstruction is
+a **step-6 rerun** — steps15 is not involved and `cshifts_final` does not
+change. `correct3d_extra=0` ignores the file without deleting it, which is how
+the with/without pair gets reconstructed.
+
+**What it cannot tell you.** The volume it re-projects was reconstructed with
+the current shifts, so part of the answer is the metric's own bias rather than
+a residual misalignment, and a rigid object translation is invisible to it by
+construction. Run `tests/find_shifts_extra/test_find_shifts_null.py` at the
+same grid, angle count and slab, and treat an answer of that size as noise.
+
 ## Running it on Polaris
 
 ```bash
 ssh polaris
 cd /eagle/APS_IRI/vnikitin/holotomocupy_gpu_reduced/experimental/ctxl_FT_4K_RD300_007p5nm
-source /eagle/APS_IRI/vvnikitin/sw/env.sh
-python ../check_data_read.py config_steps15.conf   # a few seconds, no GPU
+source ../polaris_env.sh
 qsub polaris_run.sh                                # steps15 + bin2 + bin1 + bin0
 qstat -u $USER                                     # watch it
 tail -f slurm-*.out                                # the job log, in this directory
 ```
 
-[`check_data_read.py`](../check_data_read.py) is the pre-flight: it prints the
-four shift sources with their exact paths, row counts and bin factors, the
-resulting `cshifts_final` per distance, and the bin-factor evidence out of
-`<pfile>_rec_.info` and `ht_<pfile>.m`. `polaris_run.sh` runs it too, before
-the GPU healthcheck, so the same report heads the job log; running it by hand
-first just saves finding a missing shift file 20 minutes into steps15. It exits
-non-zero only on `[ BAD ]`.
+There used to be a `check_data_read.py` pre-flight here -- it resolved the
+paths step 3 would read, checked the shift files' shapes and units, the bin
+factors, `ref_dist`, the drift and `rotation_center_shift`, and
+`polaris_run.sh` ran it before the healthcheck. It is gone, exactly as in
+[../ctxl_HT_4K_RD300_007p5nm](../ctxl_HT_4K_RD300_007p5nm/README.md): the
+script was never committed and the `python ../check_data_read.py` line only
+aborted the job. The checks that still matter are made by `steps15.py` itself
+through [`esrf_meta.py`](../../src/holotomocupy/esrf_meta.py), and they appear
+in the run log.
 
 [`polaris_run.sh`](polaris_run.sh) is one literal `mpiexec` line per stage, in
 sequence. To run only part of it — the NFP probe alone, steps 1–5 already done,
@@ -435,8 +649,8 @@ qsub polaris_run.sh
 ```
 
 **The drift file is already installed** — `correct_motion.txt` has been at
-`<path>/<pfile>/projections/` since 2026-09-01 (12003 rows), and
-`check_data_read.py` confirms step 3 finds it. It is **ours**, measured from
+`<path>/<pfile>/projections/` since 2026-09-01 (12003 rows), and step 3 logs
+the path it resolves it to. It is **ours**, measured from
 this scan's post-scan retakes by [`estimate_motion.py`](estimate_motion.py);
 its horizontal column is identically zero, so all of the x correction here is
 the random displacement.
@@ -558,7 +772,8 @@ that replaces the 14 GB above with 885 GB (4800³ × 4 B × 2) for ≈2.1 TB tot
 |---|---|
 | [`esrf_layout.py`](esrf_layout.py) | the only place that knows bliss from ewoks from **nxvds**; filenames, geometry, `NxFrames` VDS re-basing |
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
-| [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
+| [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder, 7.5 nm, `model=intensity` |
+| [`config_step6_binned_bin{2,1}.conf`](config_step6_binned_bin2.conf) | the **binned** (15 nm) arm: bin 2 -> bin 1 only, `model=amplitude`, `path_out` `..._rec6_binned` |
 | [`config_step0.conf`](config_step0.conf) | NFP probe retrieval |
 | [`correct_motion.txt`](correct_motion.txt) | **measured here** — random displacement + drift, 12003×2; already installed in `<pfile>/projections/` |
 | [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage; comment out what you do not want |

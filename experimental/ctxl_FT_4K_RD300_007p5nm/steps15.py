@@ -652,49 +652,59 @@ if rank == 0:
                             logger.warning(f'Step 3: motion {_lbl} disagrees with '
                                            f'reference_motion.mat by {_d:.4f} object px')
         # --- 3-D tomographic correction shifts ---
-        # find_drop_file looks one level deeper when the outer path is empty:
-        # a drop landing in <pfile>_/<pfile>_/ would otherwise be read as zeros.
-        _c3d_path, _c3d_note = esrf_meta.find_drop_file(path, pfile, 'correct_correct3D.txt')
-        if _c3d_note:
-            logger.warning(f'Step 3: {_c3d_note}')
-        if _c3d_path is not None:
-            logger.info(f'Step 3: reading correct3D   from {_c3d_path}')
-            _raw_c3d = np.loadtxt(_c3d_path)
+        # Peter's correct_correct3D.txt only.  Our own refinement
+        # (correct_correct3D_extra.txt, written by step7.py) is applied in
+        # STEP 6, so a refit does not cost a steps15 rerun.
+        #
+        # Same unit trap as rhapp: ESRF fits correct3D with nabu on the
+        # <pfile>_rec_.nx projections, whose PixelSize in <pfile>_rec_.info is
+        # bin_factor times this scan's own voxel, so the file is in binned px
+        # and scales.  1 (default) leaves older scans alone.
+        if c3d_bin > 0:
+            _c3d_bin, _c3d_why = c3d_bin, 'correct3d_bin in the config'
+        else:
+            _c3d_bin, _c3d_why = esrf_meta.bin_from_pixelsize(
+                _meta_recinfo['pixelsize_m'] if _meta_recinfo else None, _vox)
+            if _c3d_bin is None:
+                _c3d_bin, _c3d_why = 1, 'no <pfile>_rec_.info, assuming 1'
+            else:
+                _c3d_why = f'<pfile>_rec_.info: {_c3d_why}'
+        if _meta_recinfo:
+            _b_info, _n_info = esrf_meta.bin_from_pixelsize(_meta_recinfo['pixelsize_m'], _vox)
+            if _b_info is not None and _b_info != _c3d_bin:
+                logger.warning(f'Step 3: correct3d_bin={_c3d_bin} but '
+                               f'<pfile>_rec_.info implies {_b_info} ({_n_info})')
+        logger.info(f'Step 3: correct3D bin factor = {_c3d_bin}  ({_c3d_why})')
+
+        def _read_correct3d(fname, label):
+            """[ntheta, 2] (y, x) in raw detector px; zeros when there is no file.
+
+            find_drop_file looks one level deeper when the outer path is empty:
+            a drop landing in <pfile>_/<pfile>_/ would otherwise read as zeros.
+            """
+            _p, _note = esrf_meta.find_drop_file(path, pfile, fname)
+            if _p is None:
+                logger.info(f'Step 3: {label} file not found, using zeros')
+                return np.zeros([ntheta, 2], dtype='float32')
+            if _note:
+                logger.warning(f'Step 3: {_note}')
+            logger.info(f'Step 3: reading {label:<11} from {_p}')
+            _raw = np.loadtxt(_p)
             # Peter's files have ntheta+1 rows: his angle grid runs 0..180
             # INCLUSIVE (ANGLE_BETWEEN_PROJECTIONS in the PyHST .par times
             # TOMO_N is exactly 180 deg), so the last row is the 180 deg repeat
             # and dropping it is right.  Anything else belongs in the log.
-            if _raw_c3d.shape[0] != ntheta:
-                logger.warning(f'Step 3: correct3D has {_raw_c3d.shape[0]} rows for '
+            if _raw.shape[0] != ntheta:
+                logger.warning(f'Step 3: {label} has {_raw.shape[0]} rows for '
                                f'{ntheta} angles; using the first {ntheta}')
-            raw_3d = _raw_c3d[:ntheta, ::-1].astype('float32')
-            # Same unit trap as rhapp: ESRF fits correct3D with nabu on the
-            # <pfile>_rec_.nx projections, whose PixelSize in <pfile>_rec_.info
-            # is bin_factor times this scan's own voxel, so the file is in
-            # binned px and scales.  1 (default) leaves older scans alone.
-            if c3d_bin > 0:
-                _c3d_bin, _c3d_why = c3d_bin, 'correct3d_bin in the config'
-            else:
-                _c3d_bin, _c3d_why = esrf_meta.bin_from_pixelsize(
-                    _meta_recinfo['pixelsize_m'] if _meta_recinfo else None, _vox)
-                if _c3d_bin is None:
-                    _c3d_bin, _c3d_why = 1, 'no <pfile>_rec_.info, assuming 1'
-                else:
-                    _c3d_why = f'<pfile>_rec_.info: {_c3d_why}'
-            if _meta_recinfo:
-                _b_info, _n_info = esrf_meta.bin_from_pixelsize(_meta_recinfo['pixelsize_m'], _vox)
-                if _b_info is not None and _b_info != _c3d_bin:
-                    logger.warning(f'Step 3: correct3d_bin={_c3d_bin} but '
-                                   f'<pfile>_rec_.info implies {_b_info} ({_n_info})')
-            raw_3d *= _c3d_bin
-            logger.info(f'Step 3: correct3D bin factor = {_c3d_bin}  ({_c3d_why})')
-            logger.info(f'Step 3: correct3D, raw detector px:  '
-                        f'y ptp {np.ptp(raw_3d[:, 0]):.3f}  mean {raw_3d[:, 0].mean():+.4f}   '
-                        f'x ptp {np.ptp(raw_3d[:, 1]):.3f}  mean {raw_3d[:, 1].mean():+.4f}')
-            correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
-        else:
-            logger.info('Step 3: correct3D file not found, using zeros')
-            correct3d_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+            _s = _raw[:ntheta, ::-1].astype('float32') * _c3d_bin
+            logger.info(f'Step 3: {label}, raw detector px:  '
+                        f'y ptp {np.ptp(_s[:, 0]):.3f}  mean {_s[:, 0].mean():+.4f}   '
+                        f'x ptp {np.ptp(_s[:, 1]):.3f}  mean {_s[:, 1].mean():+.4f}')
+            return _s
+
+        raw_3d = _read_correct3d('correct_correct3D.txt', 'correct3D')
+        correct3d_shifts = np.tile(raw_3d[:, np.newaxis], (1, ndist, 1))
 
         # --- Sum all sources and save ---
         shifts_final = random_shifts + rhapp_shifts + motion_shifts + correct3d_shifts
@@ -933,7 +943,7 @@ else:
 
         scale = 1.0 / 2**bin
         r = (cshifts * scale).astype('float32')
-        r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+        r[..., 1] += rotation_center_shift * scale
         r_gpu = cp.array(r)
 
         # Ref for this bin level (rank 0 → Bcast)

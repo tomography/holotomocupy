@@ -85,7 +85,7 @@ for dataset_id in dataset_ids:
         logger.info(f'=== Dataset {dataset_id} ===')
 
     # --- Geometry ---
-    energy                  = read_energy(meta_file)
+    energy                  = args.energy if args.energy is not None else read_energy(meta_file)
     z1_ref                  = read_sx0(meta_file)
     z1                      = read_sx(meta_file) - z1_ref
     detector_pixelsize      = read_detector_pixelsize(meta_file)
@@ -140,6 +140,8 @@ for dataset_id in dataset_ids:
         checkpoint_step = checkpoint_step,
         error_step = error_step,
         start_iter              = 0,
+        psf_sigma               = args.psf_sigma,
+        shift_type              = args.shift_type,
         path_out                = _path_out,
         comm                    = comm,
     )
@@ -150,7 +152,7 @@ for dataset_id in dataset_ids:
     with h5py.File(scan_file, 'r') as f:
         raw_slice = f['entry_0000/ESRF-ID16A/PCIe/data'][cl.st_theta:cl.end_theta, sty:sty+n, stx:stx+n].astype('float32')
     global_mean = comm.allreduce(raw_slice.sum(), op=MPI.SUM) / (ntheta * n * n)
-    cl.data[:] = np.sqrt(np.abs(raw_slice / (global_mean + 1e-5)))
+    cl.data[:] = np.abs(raw_slice / (global_mean + 1e-5))
 
     cl.vars['proj'][:] = 0
     cl.vars['prb'][:] = 1

@@ -222,4 +222,19 @@ report*
 tests/test_results/
 
 *.txt
+# ...except the shift files that are INPUTS to the pipeline, not outputs
+!correct_correct3D*.txt
+!correct_motion.txt
+!requirements*.txt
 log*
+*.h5
+*.csv
+# ...except the Nelder-Mead trace, which nm_figs.py reads to rebuild the PDF
+!tests/find_shifts_extra/doc/*_trace.csv
+
+# Generated or downloaded, never committed: the demo outputs, and the measured
+# ID16A probe (2 x 64 MB) that phantoms.fetch_probe() pulls on first use.
+demo/demo_out/
+demo/data/
+*.tif
+

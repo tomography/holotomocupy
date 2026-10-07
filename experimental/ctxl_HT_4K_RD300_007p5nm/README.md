@@ -227,7 +227,7 @@ if the script is ever used to *measure* a shrinkage instead of bounding one.
 For scale on what leaving `rho[tp]` free costs when there is nothing to fit: on
 `../Y350a_largedisp` the optimizer invents ≈2200 ppm of edge displacement, 8×
 that scan's upper limit, by absorbing displacement the position refinement
-should own — [`../fig09_shrink_vs_noshrink.py`](../fig09_shrink_vs_noshrink.py)
+should own — [`../Y350a_largedisp_006nm/README.md`](../Y350a_largedisp_006nm/README.md)
 measures the resulting 15–24 % loss. With ±300 px of random displacement, this
 scan is exposed to exactly that failure mode.
 
@@ -647,12 +647,35 @@ anyway. The pass is only asked for them on the iterations that get logged.
 `1/norm_const` — so it is in the same units as the volume that is written out;
 `dobj_rel` is scale-free either way and is the one to compare across levels.
 
+## Step 7 — refining the per-angle drift
+
+[`step7.py`](step7.py) re-projects a step-6 checkpoint and searches for the
+per-angle shift that minimises the entropy of the FBP. One GPU, no MPI:
+
+```bash
+python step7.py config_step6_bin2.conf --dry-run      # geometry and units
+python step7.py config_step6_bin2.conf                # ~20 min
+```
+
+It writes `correct_correct3D_extra.txt` into this directory, in Peter's layout
+and binned pixels. Step 6 adds it to the positions it reads
+(`correct3d_extra=1` in `config_step6_*.conf`), so the next reconstruction is
+a **step-6 rerun** — steps15 is not involved and `cshifts_final` does not
+change. `correct3d_extra=0` ignores the file without deleting it, which is how
+the with/without pair gets reconstructed.
+
+**What it cannot tell you.** The volume it re-projects was reconstructed with
+the current shifts, so part of the answer is the metric's own bias rather than
+a residual misalignment, and a rigid object translation is invisible to it by
+construction. Run `tests/find_shifts_extra/test_find_shifts_null.py` at the
+same grid, angle count and slab, and treat an answer of that size as noise.
+
 ## Running it on Polaris
 
 ```bash
 ssh polaris
 cd /eagle/APS_IRI/vnikitin/holotomocupy_gpu_reduced/experimental/ctxl_HT_4K_RD300_007p5nm
-source /eagle/APS_IRI/vvnikitin/sw/env.sh
+source ../polaris_env.sh
 qsub polaris_run.sh                                   # steps15 + bin2 + bin1 + bin0
 qstat -u $USER                                        # watch it
 tail -f slurm-*.out                                   # or the job log
@@ -817,53 +840,57 @@ the stencil would be valid there — the two arms are only comparable if they
 regularise the same way.
 
 The detector frequencies above the object grid's Nyquist -- which only exist
-once the projection plane is finer than the object -- are **zeroed**: the object
-lives on the coarse grid, so it is band-limited to `|f| < 1/2`, and the sinogram
-is the band-limited interpolation of the coarse one onto the fine detector grid.
+once the projection plane is finer than the object -- **wrap**: the index is
+taken mod 2n, so the object is modelled as a delta comb on its own grid and
+those bins carry aliased replicas of the low frequencies.  That is what
+`~/APS_PXM/tomo_usfft` does, and this kernel matches it.  The band-limited
+alternative -- zero those bins, since a coarse object physically cannot produce
+content above its own Nyquist -- is carried as a commented-out block in `gather`
+in `cuda_kernels.py` and is restored by uncommenting.
 
-`~/APS_PXM/tomo_usfft` instead lets the index wrap mod 2n, modelling the object
-as a delta comb, and this kernel originally matched it.  **That is fatal at
-`nd = 2n` and was the cause of the first `tomo_upsample=2` run stalling.**
-Wrapping makes the gathered spectrum n-periodic, and the length-`nd` inverse
-transform of an n-periodic spectrum is a comb: every *odd* detector sample comes
-out exactly zero, and the even ones are `sqrt(2)` too large.  Measured at
-`n = 64, nd = 128` on a Gaussian phantom:
+The two differ **only** above the object's Nyquist; the `|f| < 1/2` content is
+identical.  Measured at `n = 128 -> nd = 256`, 64 angles, disc phantom, against
+the true fine-grid line integrals:
 
-| | sinogram samples 58..64 |
-|---|---|
-| `nd = n` (upsample 1) | 1.3721 1.3926 1.4093 1.4219 1.4304 1.4347 1.4347 |
-| wrap, `nd = 2n` | 1.9549 **0.** 2.0020 **0.** 2.0260 **0.** 2.0260 |
-| zero, `nd = 2n` | 0.9775 0.9906 1.0010 1.0085 1.0130 1.0145 1.0130 |
+| | in-band err | out-of-band power | total model err | `fbp` at `nd=2n` |
+|---|---|---|---|---|
+| wrap | 0.0255 | 17.24x truth | 0.1925 | 4.3219 |
+| zero | 0.0255 | 0.06x truth | 0.0278 | 0.4405 |
 
-Half the psi plane therefore had `psi = exp(i*0) = 1` -- no object at all.  The
-data can never be matched there, so `bottom` in the BH line search collapsed to
-~1e-18, `alpha` came out with the wrong sign, and the object froze (`dobj_rel`
-0.0228 -> 8.5e-6 while `err` *rose* from 0.0060 at iter 32 to 0.0094 at 96).
-The initial `err` looked deceptively healthy -- 0.054316 against the `u1` arm's
-0.053759 -- because a comb preserves the *local mean* exactly (0.36414 * sqrt(2)
-= 0.51497, the `u1` mean), and Fresnel propagation plus the demagnifying shift
-low-pass the psi plane before it reaches the detector.  All the error sat at
-Nyquist/2, where no object update could reach it.
+`fbp` at `nd = n` is 0.4405 for both, so zeroing is what makes `nd = 2n`
+reproduce it.  BH never calls `fbp`; step 5's initial guess does.  On the
+synthetic e2e run the solver converges under both, final/initial `err` 0.0855
+(wrap) against 0.0672 (zero) -- so this choice is a model-accuracy question, not
+the cause of a stall.
 
-With the bins zeroed, `proj = R(obj)/norm_const` is invariant under the object-
-grid change -- 0.998502 / 0.999519 / 0.999907 at N = 128 / 256 / 512, converging
-as the 2x2 average's own discretisation error shrinks -- which is why
-`norm_const` needs no new factor and obj carries over from bin 1 unscaled.  It
-also fixes `fbp`: `||R fbp(d) - d||/||d||` is 0.341 at `nd = 2n`, equal to the
-`nd = n` value, against 5.911 under the delta-comb model (the ramp filter ran out
-to `|f| = nd/(2n)` and `RT` scattered the aliased outer bins back onto real low
-frequencies).  BH never calls `fbp`; step 5's initial guess does.
+At `theta = 0` and `90` degrees -- and only there -- the wrap is exact rather
+than aliasing, and those two sinogram rows come out as **combs** with every odd
+detector sample exactly zero.  The shift between detector bins `tx` and `tx+n`
+is `2n*cos(theta)` cells in the padded spectrum, and the mod-`2n` wrap maps it
+onto itself only when that is `== 0 (mod 2n)`, i.e. `cos`/`sin` in `{0, +-1}`.
+An integer shift is not sufficient: `theta = atan(3/4)` at `2n = 320` shifts by
+a whole 256 cells and still aliases (`odd/even = 1.006`, no comb).
 
-At `nd = n` the guard can never trigger -- `fr` is in `[-1/2, 1/2)` -- so the
+In practice this is **2 rows out of 4000** -- 0.05% of the sinogram -- and zero
+rows if the angle grid does not land exactly on 0 and 90 degrees.  It is a
+curiosity, not a reason to pick one model over the other; the real cost of the
+wrap is the 17x out-of-band aliasing above, which affects every angle and is
+invisible in a sinogram because it sits above the object's Nyquist.
+
+At `nd = n` neither branch can trigger -- `fr` is in `[-1/2, 1/2)` -- so the
 `tomo_upsample=1` arm and every pre-`tomo_upsample` run are bit-for-bit
-unchanged.
+unchanged whichever way the block is set (`max|R_wrap - R_zero| = 0`).
+
+Unrelated trap found while measuring this: `R` returns **all zeros** for
+`n % 4 == 1` (the `(1 - n % 4)` factor in `phi` evaluates to 0), at any `nd`.
+Every size in this ladder is even, so it never bites here.
 
 Two test scripts cover the option, both single-GPU and file-free:
 `tests/tomo/test_tomo_nd.py` for the operator (`nd = n` is bit-identical to the
 un-parameterised `R`, `R`/`RT` stay adjoint at `nd = 2n`, `R`'s *values* are
-`nd`-independent, and the `|f| >= 1/2` bins are empty with no comb in the
-sinogram — the last check is the one that catches a regression to the wrapping
-kernel), and `tests/tomo/test_upsample_e2e.py` for the
+`nd`-independent, and the `|f| >= 1/2` bins carry the aliased replicas with the
+θ = 0 and 90° rows combed — those last checks pin down which aliasing model is
+compiled in), and `tests/tomo/test_upsample_e2e.py` for the
 plumbing: a synthetic 2-distance step-6 run reconstructed from the same data at
 `nobj=160, upsample=1` and at `nobj=80, upsample=2`, plus the bin1 → bin0
 checkpoint read (obj z ×2, obj x/y ×1, prb ×2, pos ×2).
@@ -886,42 +913,11 @@ z is not binned — the object keeps the full projection z.
 Only bin 2 reads `obj_init` at all (`start_iter=0`); bins 1 and 0 resume from
 checkpoints.
 
-### The two arms — `tomo_upsample=2` and `tomo_upsample=1`
+### Iterations, walltime and disk
 
-Both are set up to run, at all three bin levels, so they can be compared head to
-head. They differ only in the object x/y grid; everything on the detector side
-is identical.
-
-| | `tomo_upsample=2` | `tomo_upsample=1` |
-|---|---|---|
-| configs | `config_step6_bin{2,1,0}.conf` | `config_step6_u1_bin{2,1,0}.conf` |
-| PBS script | [`polaris_run.sh`](polaris_run.sh) | [`polaris_run_u1.sh`](polaris_run_u1.sh) |
-| `path_out` | `<pfile>_rec6_u2` | `<pfile>_rec6_u1` |
-| object x/y (bin 2/1/0) | 632 / 1264 / 2528 | 1264 / 2528 / 5056 |
-| projection width | 1264 / 2528 / 5056 | 1264 / 2528 / 5056 |
-| voxels | z `v`, x/y `2v` | isotropic |
-| bin-2 `obj_init` | `/exchange/obj_init_re60_2`, averaged 2×2 in x/y | `/exchange/obj_init_re60_2`, as written |
-| `lam_laplacian` | 0 at every level | 0 at every level |
-
-They must not share a `path_out`: the checkpoints have incompatible object
-shapes (2528 vs 1264 x/y at bin 1) and the two ladders use the same cumulative
-iteration numbering, so one would seed itself from the other's file. For the
-same reason neither arm writes the *bare* `<pfile>_rec6` — that directory holds
-the completed ladder from before `tomo_upsample` existed, whose
-`checkpoint_1504.h5` the half-set configs still read positions from, and whose
-`checkpoint_1024.h5` the `u1` bin-1 level would otherwise have resumed from
-instead of from its own bin-2 result.
-
-Steps 1–5 are shared: neither `steps15.py` nor `config_steps15.conf` knows about
-`tomo_upsample`, both arms read the same `obj_init`, and `polaris_run_u1.sh`
-therefore has its `steps15` line commented out.
-
-Positions, probe and `pos` are detector-plane in both arms, so a checkpoint from
-either can be used as the `pos_checkpoint` source for the half-set ladders.
-
-(Both trees now carry these same numbers: 1024 iterations at bin 2, then 256
-each at bin 1 and bin 0. `polaris_run.sh` does not repeat them in its comments,
-so the config is the single place they live.)
+1024 iterations at bin 2, then 256 each at bin 1 and bin 0. `polaris_run.sh`
+does not repeat them in its comments, so the config is the single place they
+live.
 
 `checkpoint_step=32` divides every `start_iter` and every `niter−1`, so the
 handoff checkpoints are guaranteed to exist. Preemption is survivable: a
@@ -940,93 +936,15 @@ why the script asks for 18 h. Trim it once the first `.out` file exists.
 |---|---|
 | `<pfile>.h5` (4000 × 4096² × 2 B × 4 dist) | 537 GB |
 | bin-0 pdata (× 4 B × 4 dist) | 1074 GB |
-| `<pfile>_obj.h5` (bin 2 only, both arms) | 20 GB |
+| `<pfile>_obj.h5` (bin 2 only) | 4 GB |
 
 ≈2.5 TB, against 240 TB free on eagle as of 2026-08-31. Set
 `start_level_rec=1` to stop at the 2×2 level if that changes.
 
 `<pfile>_obj.h5` is small because `start_level_rec=2`: step 5 writes a
 Paganin+FBP init only for bin 2, and only bin 2 ever reads one (bins 1 and 0
-resume from checkpoints). That is 1264 × 632² × 4 B × 2 = 4 GB for the
-`tomo_upsample=2` arm plus 1264³ × 4 B × 2 = 16 GB for the `tomo_upsample=1`
-arm. Lowering `start_level_rec` to 0 would add 5056 × 2528² (258 GB) and
-2528 × 1264² (32 GB) per arm.
-
-## Half-set runs — even and odd projections
-
-Two extra ladders reconstruct half the projections each, with the positions
-frozen at what the full 4000-projection run found:
-
-| | p0 | p1 |
-|---|---|---|
-| projections | even global indices 0, 2, …, 3998 | odd 1, 3, …, 3999 |
-| `ntheta` / `start_theta` | 2000 / 0 | 2000 / 1 |
-| `path_out` | `<pfile>_rec6_p0` | `<pfile>_rec6_p1` |
-| configs | `config_step6_p0_bin{2,1,0}.conf` | `config_step6_p1_bin{2,1,0}.conf` |
-
-Same three levels, same `start_iter`/`niter` (0→1025, 1024→1281, 1280→1537),
-same `rho[obj]`, `rho[prb]`, `lam_laplacian`, `nobj`, `mask*` and
-`rotation_center_shift` as the full ladder. Only three things differ.
-
-```bash
-qsub polaris_run_halves.sh     # p0 ladder then p1 ladder, six mpiexec lines
-```
-
-**The split is `ntheta` + `start_theta`, and nothing else.** `Reader.__init__`
-builds `ids = arange(start_theta, ntheta0, ntheta0/ntheta)` with
-`ntheta0 = len(/exchange/theta) = 4000`, so `ntheta=2000` makes the step exactly
-2 and `ids` are the half's *global* angle indices. Every read is indexed by
-them — `pdata{k}_{bin}`, `pref_{bin}`, `shrink`, `cshifts_final`, `theta`, and
-the position checkpoint below — so the two halves are disjoint and together are
-the whole scan.
-
-**The positions are fixed, not refined.**
-
-```
-pos_checkpoint=<pfile>_rec6/checkpoints/checkpoint_1504.h5
-rho=1.0,0.05,0,0            # third element 0
-```
-
-`step6.py` calls `Reader.read_pos_checkpoint` after the usual initialisation; it
-reads rows `ids[st:end]` of that checkpoint's `/pos` — so each projection keeps
-*its own* refined position — and rescales 4096 → this level's `n` with
-`pos*scale + 0.5*(scale-1)`, the same transform `read_checkpoint` uses between
-levels. `rho[pos] = 0` then makes `gradpos = y[2]*rho_sq['pos']` identically
-zero, the CG direction for `pos` stays zero, and nothing moves for the whole
-ladder. `rotation_center_shift` is inert in this configuration — `read_pos`
-adds it, then `read_pos_checkpoint` overwrites the result, and the checkpoint
-positions already contain it — but it is kept in sync so a rerun without
-`pos_checkpoint` still does the right thing.
-
-`checkpoint_1504.h5` is the last checkpoint the full bin-0 run wrote; it stopped
-at 1504 of the planned 1536, the queue being `preemptable`. If the full run is
-extended later, repoint `pos_checkpoint` — the positions move well under a pixel
-in 32 iterations, but both halves must use the *same* checkpoint.
-
-**`estimate_rho=False`** — as it now is at every level of the full ladder too,
-so this is no longer a difference between the halves and the whole. The
-coordinate search would tune `rho[prb]` separately in each half and the two
-would no longer be running the same solver. If some bin-2 run is ever made with
-it on and logs `estimate_rho_coord: final rho = [...]`, copy its obj and prb
-entries into all six `rho=` lines by hand.
-
-**What is *not* independent between the halves.** The data is, and the object
-and probe refined from it are. Shared are (i) the positions, by construction,
-and (ii) the bin-2 starting object `/exchange/obj_init_re60_2`, which step 5
-built by Paganin+FBP over **all** 4000 projections and which both halves start
-from. So an FSC between p0 and p1 is not the FSC of two independent
-reconstructions: the common initial guess correlates them at low frequency, and
-freezing the positions removes the position refinement's own contribution to the
-discrepancy. It measures how much one half of the data alone constrains the
-volume when the geometry is already known. Making the starting object
-independent too means rerunning step 5 per half (`start_step=5`, `ntheta=2000`,
-a distinct `paganin` tag so the two do not collide in the same file, +1 TB each
-in `<pfile>_obj.h5`); that has not been done.
-
-**Cost.** A little under half the full ladder, which took 0.71 + 0.66 + 2.78 h
-on 2 nodes (`conv_bin{2,1,0}.csv`). Both halves fit in ~5 h; the job asks for
-12 h of preemption headroom. Disk: 2 × the checkpoint set, i.e. 2 × 1.03 TB per
-retained bin-0 checkpoint.
+resume from checkpoints). That is 1264 × 632² × 4 B × 2 = 4 GB. Lowering
+`start_level_rec` to 0 would add 5056 × 2528² (258 GB).
 
 ## Probe
 
@@ -1083,10 +1001,6 @@ The driver's other settings do corroborate the rest of the config:
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
 | [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
 | [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage; comment out what you do not want |
-| [`config_step6_u1_bin{2,1,0}.conf`](config_step6_u1_bin2.conf) | the same ladder at `tomo_upsample=1`, writing `_rec6_u1` |
-| [`polaris_run_u1.sh`](polaris_run_u1.sh) | PBS job for the `tomo_upsample=1` arm; `steps15` commented out |
-| [`config_step6_p{0,1}_bin{2,1,0}.conf`](config_step6_p0_bin2.conf) | the same ladder on even / odd projections, positions frozen — see Half-set runs |
-| [`polaris_run_halves.sh`](polaris_run_halves.sh) | PBS job for the two half-set ladders, six `mpiexec` lines |
 | [`show_geometry.py`](show_geometry.py) | prints the derived geometry and the per-level config blocks |
 | [`scan_overview.py`](scan_overview.py) | the overview figure above |
 | [`estimate_center.py`](estimate_center.py) | rotation centre from opposed projections |

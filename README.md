@@ -4,6 +4,31 @@ GPU-accelerated X-ray holotomography reconstruction with MPI multi-GPU support.
 
 Holotomography is a coherent imaging technique that reconstructs the 3-D complex refractive-index distribution of a sample by combining holography with tomography. This package provides iterative algorithms optimized for large datasets at modern synchrotron sources.
 
+## Quick start
+
+```bash
+git clone https://github.com/tomography/holotomocupy
+cd holotomocupy
+conda env create -f environment.yml     # OpenMPI, MPI-enabled h5py, CuPy
+conda activate holotomocupy
+pip install -e .
+
+tests/unit/run.sh                       # 148 checks, ~1 min on one GPU
+cd demo && ./run.sh 01_nfp_probe.py     # a real reconstruction, ~2 min
+```
+
+You need one NVIDIA GPU and a CUDA 12 driver (`cupy-cuda13x` in
+`environment.yml` for CUDA 13). Nothing else is required: the demo builds its
+own phantom and downloads the measured probe on first use, so there is no
+beamline data to find. If `tests/unit/run.sh` passes, the install is good.
+
+Full documentation: **https://holotomocupy.readthedocs.io** (built from
+[`docs/`](docs/)). See also [`demo/README.md`](demo/README.md) for what the
+two demos do and [`tests/README.md`](tests/README.md) for the rest of the
+tests.
+
+---
+
 ## Key features
 
 - **GPU acceleration** via CuPy (drop-in GPU NumPy)
@@ -79,28 +104,29 @@ If mathDX is not found you will see a `UserWarning` explaining which path is mis
 
 The first time a new grid size is used, the package JIT-compiles a small CUDA shared library with `nvcc` and caches it in `CUFFTDX_SO_DIR`. In an MPI run, **only rank 0 compiles**; all other ranks wait at a barrier and then load the pre-built library. Subsequent runs reuse the cached `.so` and skip compilation entirely.
 
-### Conda environment
+### Environment
 
 ```bash
-conda create -n holotomocupy -c conda-forge \
-    cupy mpi4py "h5py=*=mpi_openmpi*" dxchange tifffile nvtx \
-    setuptools matplotlib psutil jupyter matplotlib-scalebar
+conda env create -f environment.yml
 conda activate holotomocupy
-```
-
-### Install the package
-
-```bash
-git clone https://github.com/nikitinvv/holotomocupy
-cd holotomocupy
 pip install -e .
 ```
+
+[`environment.yml`](environment.yml) pins the two things that are easy to get
+wrong: **OpenMPI**, and an **MPI-enabled h5py** (`h5py=*=mpi_openmpi_*`) --
+`Writer` opens its checkpoints with `driver='mpio'`, and the plain serial h5py
+fails there. `mpi4py` is imported by the logger, so it is needed even for a
+single-GPU run. [`requirements.txt`](requirements.txt) is the pip-only list,
+but you still have to supply MPI and a parallel h5py yourself.
 
 ---
 
 ## Reconstruction pipeline
 
-A complete example is in `experimental/Y350a_dist1234/`. The pipeline has two stages:
+**Start with [`demo/`](demo/)** — the whole chain on synthetic data, two
+notebooks for one GPU with MPI scripts beside them, no beamline data needed.
+A complete example on real data is in `experimental/Y350a_dist1234/`. The
+pipeline has two stages:
 
 ```bash
 cd experimental/Y350a_dist1234
@@ -123,7 +149,7 @@ Near-field ptychography (NFP) reconstruction of the illumination probe. Writes a
 
 - **Step 1** — reads raw EDF detector frames in parallel, writes a single HDF5 file with all distances, flat/dark fields, encoder shifts, and beam-monitor attributes
 - **Step 2** — outlier removal (median-filter spike detection) and intensity normalisation per projection (GPU)
-- **Step 3** — combines all shift sources into `cshifts_final`: encoder shifts from `correct.txt`, inter-plane alignment from Peter's RHAPP pipeline (`rhapp.mat`), slow-drift motion correction (`correct_motion.txt`), and optional 3-D tomographic correction
+- **Step 3** — combines all shift sources into `cshifts_final`: encoder shifts from `correct.txt`, inter-plane alignment from Peter's RHAPP pipeline (`rhapp.mat`), slow-drift motion correction (`correct_motion.txt`), and optional 3-D tomographic correction (`correct_correct3D.txt`)
 - **Step 4** — multi-distance back-projection onto the object plane at multiple bin levels; includes amplitude normalisation across distances
 - **Step 5** — multi-distance Paganin phase retrieval followed by FBP reconstruction at all bin levels to produce the initial object guess for step 6
 
@@ -141,11 +167,28 @@ mpirun -np <ngpus> ./bind.sh python step6.py config_step6.conf
 2. External `.vol` file specified by `init_vol` in the config
 3. Paganin reconstruction written by step 5
 
+### Step 7 — Per-angle drift refinement (optional)
+
+`step7.py` re-projects a step-6 checkpoint and searches for the per-angle
+shift that minimises the entropy of an FBP reconstruction — one GPU, no MPI.
+It writes `correct_correct3D_extra.txt`, which step 6 adds to the positions it
+reads (`correct3d_extra` in the config), so refining the alignment costs a
+step-6 rerun and not a `steps15.py` one.
+
+```bash
+python step7.py config_step6_bin2.conf
+mpirun -np <ngpus> ./bind.sh python step6.py config_step6_bin2.conf   # again
+```
+
+The algorithm is `holotomocupy.autofocus`; `tests/find_shifts_extra` tests it
+and `tests/find_shifts_extra/doc/nelder_mead.pdf` writes it up. It currently
+exists for the AtomiumS1, AtomiumS1_HT, ctxl_FT and ctxl_HT datasets.
+
 ---
 
 ## Running on Polaris (ALCF)
 
-Polaris is an A100 cluster at Argonne Leadership Computing Facility (ALCF). Each node has **4 A100 GPUs**. The `polaris/` directory contains ready-to-use scripts.
+Polaris is an A100 cluster at Argonne Leadership Computing Facility (ALCF). Each node has **4 A100 GPUs**. Ready-to-use job scripts are in each `experimental/<dataset>/` folder, and they all source [`experimental/polaris_env.sh`](experimental/polaris_env.sh).
 
 ### Python environment
 
@@ -161,7 +204,7 @@ source "${VENV_DIR}/bin/activate"
 pip install -e /path/to/holotomocupy
 ```
 
-The same activation snippet (`module load conda` + `source …/activate`) is used in the PBS job script to reproduce the environment on compute nodes.
+`experimental/polaris_env.sh` does exactly this inside the job, plus the Lustre / MPI-IO settings parallel HDF5 needs on `/eagle`. Override the venv it picks with `HTC_VENV`, and set `HTC_ENV_CHECK=1` to print what resolved.
 
 See [ALCF Python docs](https://docs.alcf.anl.gov/polaris/data-science/python/) for more details.
 
@@ -231,7 +274,7 @@ python -m venv "${VENV_DIR}" --system-site-packages
 source "${VENV_DIR}/bin/activate"
 
 # 3. Clone and install
-git clone https://github.com/nikitinvv/holotomocupy
+git clone https://github.com/tomography/holotomocupy
 cd holotomocupy
 pip install -e .
 
@@ -337,22 +380,20 @@ iter=256: pos mean abs error [px]  d0:(0.023,0.019)  d1:(0.026,0.020)  d2:(0.030
 
 ## Running tests
 
-Tests live in `tests/` as Jupyter notebooks:
-
-| Notebook | What it tests |
-|---|---|
-| `tests/shift/` | B-spline shift operators (forward, adjoint, derivatives) |
-| `tests/tomo/` | Radon transform R / RT / FBP |
-| `tests/holotomo3d/` | End-to-end holotomography reconstruction |
-| `tests/nfp/` | Near-field ptychography probe calibration |
-| `tests/mosaic/` | Mosaic / tiled reconstruction |
-
-Run from the command line:
+Tests are scripts, one folder per subject; each prints its own verdict and
+exits non-zero on failure. [`tests/README.md`](tests/README.md) lists all of
+them with what they need and how long they take.
 
 ```bash
-jupyter nbconvert --to notebook --execute tests/shift/test_shift.ipynb
-jupyter nbconvert --to notebook --execute tests/holotomo3d/test.ipynb
+tests/unit/run.sh                                    # start here, ~1 min
+tests/find_shifts_extra/run.sh                       # folders with a run.sh
+PYTHONPATH=src python tests/adjoint/test_adjoint_f1.py
 ```
+
+[`tests/unit/`](tests/unit/) is the one to run after any change to the solver:
+imports, GPU, MPI and parallel HDF5; the adjointness of every linear operator;
+and the gradients and Hessians of the data misfit by Taylor test — 148
+checks in about a minute on one GPU.
 
 ---
 
@@ -364,6 +405,12 @@ src/holotomocupy/
     rec_nfp_mpi.py      # near-field ptychography probe calibration solver (MPI-aware)
     tomo.py             # tomographic projection: R, RT, FBP (ramp/shepp/parzen), rec_tomo CG
     shift.py            # B-spline sub-pixel shift operators (S, S*, curlyS, derivatives)
+    shift_fft.py        # the same interface via the Fourier shift theorem
+    autofocus.py        # entropy autofocus for the per-angle drift (step 7)
+    psf.py              # Gaussian detector PSF
+    paganin.py          # multi-distance Paganin phase retrieval (step 5, demo)
+    extra_terms.py      # optional regularisation terms (probe fit, Laplacian)
+    esrf_meta.py        # ESRF drop-folder metadata: bin factors, file lookup
     propagation.py      # Fresnel propagator (cuFFTDx or cuPy backend)
     conv2d_cufftdx.py   # cuFFTDx JIT wrapper + availability flag
     cuda/conv2d.cu      # cuFFTDx 2-D convolution kernel source
@@ -376,18 +423,19 @@ src/holotomocupy/
     utils.py            # GPU/CPU memory utilities, visualization helpers, timer decorator
     logger_config.py    # colored MPI-aware logger
 
+demo/                   # the pipeline end to end on synthetic data, 1 or N GPUs
+
 experimental/
+    polaris_env.sh      # modules + venv for ALCF Polaris, sourced by every job
     Y350a_dist1234/     # brain dataset pipeline (steps 0–6, 4 distances)
     AtomiumS2/          # Atomium S2 dataset pipeline (steps 0–6, 4 distances)
     y350a_80um/         # y350a 80 µm dataset pipeline (steps 0–6, 4 distances)
-    performance_tests/  # timing benchmarks and MPI scaling tests
 
-tests/
-    shift/              # B-spline shift kernel adjoint / derivative tests
-    tomo/               # Radon transform consistency tests
-    holotomo3d/         # end-to-end holotomography reconstruction test
-    nfp/                # near-field ptychography test
-    mosaic/             # mosaic reconstruction test
+docs/                   # Sphinx sources for readthedocs.io
+
+tests/                  # 17 folders; see tests/README.md
+    unit/               # run this one after any change to the solver
+    performance/        # benchmarks, incl. mpi_scaling/ (moved from experimental/)
 ```
 
 ---
@@ -396,4 +444,6 @@ tests/
 
 If you use this software, please cite:
 
-> Viktor Nikitin, *HolotomocuPy — GPU-accelerated X-ray holotomography*, Argonne National Laboratory, https://github.com/nikitinvv/holotomocupy
+> Viktor Nikitin et al., "Scalable joint X-ray nano-holotomography
+> reconstruction with the bilinear Hessian method", *Optica* **13**(9),
+> 1814–1826 (2026).

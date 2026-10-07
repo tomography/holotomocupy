@@ -44,6 +44,9 @@ reader = Reader(
     args.ndist, args.nz, args.n,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
     tomo_upsample=args.tomo_upsample,
+    correct3d_extra=args.correct3d_extra,
+    correct3d_extra_file=args.correct3d_extra_file,
+    correct3d_bin=args.correct3d_bin,
 )
 writer = Writer(
     args.path_out, comm,

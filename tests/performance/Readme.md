@@ -69,7 +69,7 @@ Nothing is forward-modelled, the same as `test_mosaic.py`: the object stays at
 the zero `Rec` allocated, the probe is flat, and `data` is filled with one
 random frame per distance modulated by a per-angle scalar. BH runs a fixed
 number of iterations regardless of the values, so this times identically to
-real data while skipping the object synthesis and the `gen_sqrt_data` forward
+real data while skipping the object synthesis and the `gen_data` forward
 pass — which at `n = 8192` is the difference between a long startup and none.
 
 The synthesised inputs (positions, data) are deterministic across machines and
@@ -552,7 +552,7 @@ install — without it cuFFTDx is missing and propagation falls back to cuPy FFT
 which makes the timings incomparable with the other machines.
 
 To run one, edit two things — `#PBS -l select=` and the size block — and submit
-(`#PBS -A` is already the 14238 allocation):
+(`#PBS -A` is already the 17445 allocation):
 
 ```bash
 qsub run_polaris.sh
@@ -691,7 +691,7 @@ The 2 × 3 shape skips the otherwise natural 64-node point on purpose: there
 #### Copy-paste: complete job scripts (PBS)
 
 Each job is one `qsub` of one of the two scripts, with the header and the size
-block edited to match a row of the tables above. `-A 14238` is already set;
+block edited to match a row of the tables above. `-A 17445` is already set;
 `-l filesystems` and the queue are the only other site-specific bits.
 
 **Job 1 — mosaic bin 3, 1 × 5 (`select=1`, `debug`).** The shipped defaults:

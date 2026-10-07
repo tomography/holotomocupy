@@ -6,7 +6,7 @@ Rotation-centre sweep -- step 5 only, one slice per candidate centre.
 the tomogram: step 5 adds it to the horizontal component of the stitching
 shifts,
 
-    r[..., 1] += rotation_center_shift * scale + 0.5 * (scale - 1)
+    r[..., 1] += rotation_center_shift * scale
 
 and everything downstream (Paganin, FBP) follows.  Finding the right value is
 therefore a one-parameter search, and it does not need a full volume per trial:
@@ -335,7 +335,7 @@ with h5py.File(fpath, 'r') as fid:
     for isf, sh in enumerate(shifts):
         t0 = time.time()
         r = (cshifts * scale).astype('float32')
-        r[..., 1] += sh * scale + 0.5 * (scale - 1)
+        r[..., 1] += sh * scale
         r_gpu = cp.array(r)
 
         for i, j in enumerate(local_ids):

@@ -83,9 +83,10 @@ with h5py.File(h5, 'r') as f:
     theta  = float(f['theta'][it])
     pos    = f['pos'][it]                       # [ndist, 2] true displacement, px
     prb    = f['prb_abs'][:] * np.exp(1j * f['prb_phase'][:])
-    # /data and /ref hold sqrt(intensity); square them back to what the detector
-    # counted, so the flat-field correction below is a ratio of intensities
-    frames = f['data'][:, it].astype('float32') ** 2
+    # /data is already the intensity the detector counted; /ref is still an
+    # amplitude (the probe-fit term compares |D prb| against it), so square only
+    # that one -- the flat-field correction below is a ratio of intensities
+    frames = f['data'][:, it].astype('float32')
     flat   = f['ref'][:].astype('float32') ** 2 if a.flat == 'on' else None
 
 contrast = C.probe_contrast(prb)

@@ -1,144 +1,54 @@
 #!/bin/bash
-# Software environment for holotomocupy on ALCF Polaris.
+# Software environment for holotomocupy on ALCF Polaris.  Source it INSIDE the
+# PBS job -- batch jobs do not read ~/.bashrc:
 #
-#   source /eagle/APS_IRI/vvnikitin/sw/env.sh
+#     source <repo>/experimental/polaris_env.sh
 #
-# Must be sourced INSIDE the PBS job, not just at install time: batch jobs do
-# not read ~/.bashrc, and the cray-mpich-linked mpi4py / h5py need the module
-# library paths at run time, not only at build time.
+# HTC_VENV overrides the venv; HTC_ENV_CHECK=1 prints what actually resolved.
 #
-# Copy this file to /eagle/APS_IRI/vvnikitin/sw/env.sh -- that is the path
-# HTC_ENV in polaris_run.sh defaults to.
+# The venv is layered on the `conda` module, so mpi4py and h5py come from
+# ALCF's own build and nothing has to be compiled against the Cray wrappers.
+# (It used to be a hand-built env under /eagle; that is retired.)
 
-# HOW THIS ENV MUST BE BUILT
-# --------------------------
-# mpi4py and h5py must be pip-compiled against the Cray wrappers, NOT installed
-# from conda-forge or a PyPI wheel:
-#
-#   module unload darshan          # see below -- required, not optional
-#   conda remove --force -y mpi4py mpich openmpi mpi
-#   MPICC=cc pip install --no-cache-dir --no-binary=mpi4py --no-build-isolation mpi4py
-#   HDF5_MPI=ON CC=cc pip install --no-cache-dir --no-binary=h5py --no-build-isolation h5py
-#
-# The remaining dependencies are pure/simple and install normally -- but pin
-# numpy to the installed version so pip cannot upgrade it and break the cupy /
-# h5py ABI:
-#
-#   NPV=$(python -c "import numpy; print(numpy.__version__)")
-#   pip install --no-cache-dir "numpy==${NPV}" \
-#       fabio tifffile psutil matplotlib matplotlib-scalebar nvtx
-#
-# (nvtx is a hard import in rec_mpi.py / rec_nfp_mpi.py, so step6 needs it even
-# though nothing profiles by default.)
-#
-# Why: cray-mpich 9.1.0 ships libmpi_gnu.so.12 and an unversioned libmpi.so,
-# but NO libmpi.so.12.  conda-forge mpi4py and the PyPI wheel are both linked
-# against stock MPICH's libmpi.so.12, so they can never resolve here no matter
-# what LD_LIBRARY_PATH says.  A `cc`-built mpi4py links -lmpi -> libmpi.so ->
-# libmpi_gnu.so.12, which exists.  Symptom of getting this wrong:
-#   ImportError: libmpi.so.12: cannot open shared object file
-# and two variant files MPI.mpich.*.so / MPI.openmpi.*.so instead of one MPI.*.so.
-
-CONDA_ROOT=/lus/eagle/projects/APS_IRI/vvnikitin/sw/miniforge3
-HTC_PREFIX=/lus/eagle/projects/APS_IRI/vvnikitin/sw/envs/htc
-
-# --- modules FIRST -------------------------------------------------------
-# conda activate prepends the env to PATH, so it must come last or the env's
-# own binaries lose to the module ones.
 module use /soft/modulefiles
-module load PrgEnv-gnu
-module load cray-mpich
-# Pin the version: the site default is 12.2.2, but cupy in this env is built
-# for CUDA 13, so an unversioned load silently gives the wrong toolkit.
-module load cudatoolkit-standalone/13.0.1
-module load cray-hdf5-parallel
-# Darshan MUST be unloaded.  The cc wrapper silently injects libdarshan.so.0
-# into everything it links, and the installed Darshan build carries a NEEDED
-# entry for libmpi_gnu_123.so.12 -- a cray-mpich version that no longer exists
-# on the system.  The result is that a correctly-built mpi4py still dies with
-#   ImportError: libmpi_gnu_123.so.12: cannot open shared object file
-# even though its own libmpi_gnu.so.12 resolves fine.  Unload before BOTH the
-# pip build and every job: the bad NEEDED entry is baked in at link time, so a
-# module unloaded only at run time does not help an already-linked extension.
-module unload darshan 2>/dev/null || true
+module load conda
+conda activate base
+CONDA_NAME=$(echo "${CONDA_PREFIX}" | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
+source "${HTC_VENV:-/home/vvnikitin/venvs/${CONDA_NAME}}/bin/activate"
 
-# --- the line everything hinges on ---------------------------------------
-# The Cray PE modules populate CRAY_LD_LIBRARY_PATH, NOT LD_LIBRARY_PATH.
-# The cc/ftn compiler wrappers consult it at link time, but a bare `python`
-# process does not, so mpi4py.MPI.so fails to resolve libmpi.so.12 and h5py
-# fails to resolve libhdf5_parallel_gnu_*.so at import.  Export it explicitly.
-export LD_LIBRARY_PATH="${CRAY_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
-# Belt and braces: some cray-mpich versions leave libmpi.so.12 only here.
-[ -n "${CRAY_MPICH_DIR}" ] && export LD_LIBRARY_PATH="${CRAY_MPICH_DIR}/lib:${LD_LIBRARY_PATH}"
+export MATHDX_ROOT=${MATHDX_ROOT:-/eagle/APS_IRI/vnikitin/nvidia/nvidia-mathdx-25.12.1-cuda12/nvidia/mathdx/25.12}
 
-# GPU-aware MPI is deliberately OFF, and craype-accel-nvidia80 is not loaded.
-# holotomocupy never hands a device pointer to MPI: the only Alltoallw buffer is
-# rec_mpi.py:proj_tmp, allocated by utils.make_pinned -> cp.cuda.alloc_pinned_memory,
-# i.e. page-locked HOST memory wrapped in a numpy array; the allreduces either
-# take pinned host arrays or an explicit .get() copy.  So the CUDA GTL layer
-# would add a dependency without ever being used.  If a future change starts
-# passing cupy arrays to comm.*, load craype-accel-nvidia80 (after the cuda
-# module -- it refuses otherwise), re-export CRAY_LD_LIBRARY_PATH for
-# libmpi_gtl_cuda, and set this to 1.
+# GPU-aware MPI off: nothing hands MPI a device pointer (the Alltoallw buffer
+# is pinned HOST memory, allreduces take host arrays or an explicit .get()).
 export MPICH_GPU_SUPPORT_ENABLED=0
 
-# --- parallel HDF5 / MPI-IO on Lustre ------------------------------------
-# Every hang seen so far on Polaris has been at an h5py driver="mpio" call
-# (steps15 step 1 create, reader.read_data open).  None of this was needed on
-# tomo5; all of it is specific to /eagle being Lustre.
+# --- parallel HDF5 / MPI-IO on Lustre ---------------------------------------
+# Every hang seen on Polaris has been at an h5py driver="mpio" call.  None of
+# this was needed on tomo5; all of it is /eagle being Lustre.
 #
-# 1. File locking.  HDF5 >=1.10 takes an flock() on open.  Lustre either does
-#    not honour it or serialises it across every rank, so a 40-96 rank open can
-#    block indefinitely.  ALCF's documented setting -- turn it off.  We are not
-#    mixing readers and writers on the same file, so nothing is at risk.
+# HDF5 takes an flock() on open and Lustre serialises it across ranks, so a
+# 40-96 rank open can block indefinitely.  We never mix readers and writers on
+# one file, so turning it off risks nothing.
 export HDF5_USE_FILE_LOCKING=FALSE
-#
-# 2. ROMIO data sieving.  reader.read_data indexes with a list of theta ids
-#    (ds[ids, st:end]), which is an irregular selection.  With sieving ON,
-#    ROMIO fetches the whole enclosing span through a 512 KB sieve buffer, so a
-#    scattered read of a few GB turns into tens of GB of Lustre traffic; on
-#    writes it also does read-modify-write under a lock.  Disable both.
-#    Collective buffering is left enabled but is inert here: h5py issues
-#    independent I/O unless a `with ds.collective:` block is used.
+# reader.read_data indexes with a list of theta ids, an irregular selection.
+# With ROMIO data sieving on, a scattered read of a few GB turns into tens of
+# GB through a 512 KB sieve buffer.
 export MPICH_MPIIO_HINTS="${MPICH_MPIIO_HINTS:-*:romio_ds_read=disable:romio_ds_write=disable:romio_cb_read=enable:romio_cb_write=enable}"
+# Striping is a property of the DIRECTORY and must be set before the file is
+# created -- eagle defaults to stripe_count=1, i.e. one OST for a 134 GB h5:
+#     lfs setstripe -c 8 -S 16M <output dir>
+# Changing the directory does not restripe files already in it.
 #
-# 3. Striping is NOT set here -- it is a property of the directory, inherited
-#    at file-create time, and must be set once per output dir BEFORE the file
-#    is written:
-#       lfs setstripe -c 8 -S 16M /eagle/APS_IRI/vnikitin/20250604/<...>_rec
-#    Default on eagle is stripe_count=1, i.e. the entire 134 GB
-#    <pfile>.h5 lands on a single OST and every rank contends for that one
-#    server.  Check an existing file with `lfs getstripe <file>`; if it says
-#    stripe_count 1 the file must be rewritten after re-striping the directory
-#    (changing the dir does not restripe files already in it).
-#
-# 4. Diagnostics: set HTC_MPIIO_STATS=1 to have cray-mpich print per-file
-#    MPI-IO counters at exit.  Noisy, but it is the fastest way to tell a
-#    genuinely blocked job from one that is merely doing 50x the I/O it should.
+# HTC_MPIIO_STATS=1 prints per-file MPI-IO counters at exit; noisy, but the
+# fastest way to tell a blocked job from one doing 50x the I/O it should.
 if [ "${HTC_MPIIO_STATS:-0}" = "1" ]; then
     export MPICH_MPIIO_STATS=1
     export MPICH_MPIIO_TIMERS=1
 fi
 
-# --- conda LAST ----------------------------------------------------------
-# `conda activate` is a shell function defined by this hook; the condabin/conda
-# binary on its own cannot activate anything.
-source "${CONDA_ROOT}/etc/profile.d/conda.sh"
-conda activate "${HTC_PREFIX}"   # by full path: sw/envs is not conda's default envs_dir
-
-# --- sanity --------------------------------------------------------------
-# Set HTC_ENV_CHECK=1 to print what actually resolved.
 if [ "${HTC_ENV_CHECK:-0}" = "1" ]; then
     echo "python  : $(which python)"
-    # grep libmpi without a trailing dot: the Cray soname is libmpi_gnu.so.12.
-    _mpiso=$(python -c 'import mpi4py.MPI as m; print(m.__file__)' 2>/dev/null)
-    if [ -n "${_mpiso}" ]; then
-        ldd "${_mpiso}" | grep -i 'libmpi' | sed 's/^/libmpi  : /'
-    else
-        echo "libmpi  : mpi4py.MPI failed to import"
-    fi
-    unset _mpiso
-    # Import mpi4py.MPI, not just mpi4py: the bare package is pure Python and
+    # Import mpi4py.MPI, not mpi4py: the bare package is pure Python and
     # imports even when the compiled extension cannot find its libmpi.
     python -c "from mpi4py import MPI; import mpi4py, h5py, cupy; print('mpi4py', mpi4py.__version__, MPI.Get_library_version().split(chr(10))[0], '| h5py', h5py.__version__, 'mpi=', h5py.get_config().mpi, '| cupy', cupy.__version__)"
 fi

@@ -114,7 +114,7 @@ if os.environ.get('NOAPPLYF', '0') == '1':
 cl.vars['obj'][:] = obj[cl.st_obj:cl.end_obj]
 cl.vars['prb'][:] = prb
 cl.vars['pos'][:] = pos[cl.st_theta:cl.end_theta].transpose(1, 0, 2)
-cl.gen_sqrt_data(cl.vars, cl.data)
+cl.gen_data(cl.vars, cl.data)
 cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 obj0 = ndimage.gaussian_filter(obj.real, 2) + 1j*ndimage.gaussian_filter(obj.imag, 2)

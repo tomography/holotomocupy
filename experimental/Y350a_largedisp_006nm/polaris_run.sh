@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -26,7 +26,7 @@
 
 # --- user configuration ---
 # Software environment (modules + conda env). See the Polaris setup notes.
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 # HEALTHCHECK=0  skips the ~30 s GPU probe;  RUN_NODES=N  uses N healthy nodes.
 # --------------------------
 

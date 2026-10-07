@@ -4,7 +4,7 @@ NFP — Synthetic Self-Test (step0-style: path_out + periodic checkpoints + tiff
 
 End-to-end verification of `RecNFP` on fully synthetic data:
   1. Build a 2-D Siemens-star phantom (`proj`) and a Gaussian-smoothed probe (`prb`).
-  2. Forward-simulate diffraction patterns via `gen_sqrt_data`.
+  2. Forward-simulate diffraction patterns via `gen_data`.
   3. Run iterative reconstruction (BH) — RecNFP saves tiffs every
      `checkpoint_step` iterations to `<path_out>/checkpoints_tiff/`.
   4. After BH, rank 0 gathers final proj / prb / pos errors and writes a
@@ -49,6 +49,17 @@ checkpoint_step = 32          # save tiff + (optional) h5 every N iters
 error_step      = 32          # log error every N iters
 rho             = [1, 2, 0.1] # gradient step-size scales for [proj, prb, pos]
 photons         = None         # mean photons per pixel for Poisson noise; None to disable
+# Detector PSF as one Gaussian on the detector intensity,
+# sigma in detector pixels of this (binned) grid.  gen_data applies the SAME
+# blur it reconstructs with, so a non-zero value here tests the blurred model
+# against itself; to test robustness to a mis-specified PSF, blur the data at
+# one sigma and reconstruct at another.  0 = no blur.
+psf_sigma       = 0.0
+# Shift interpolation: 'cubic' (B-spline, mirrored edges) or 'fft' (Fourier
+# shift theorem, exact but PERIODIC -- nobj must clear n + 2*max|pos|, which
+# the nobj below does).  'fft' is what the position refinement wants: the
+# B-spline stencil's kernel error biases the position gradient.
+shift_type      = 'cubic'
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
@@ -103,7 +114,7 @@ def gen_proj(nobj, delta_beta):
 
 
 # ── Probe — loaded from ID16A tiff files (cached locally) ────────────────────
-_prb_dir = 'data/prb_id16a'
+_prb_dir = '../../demo/data/prb_id16a'
 _urls = [
     'https://g-110014.fd635.8443.data.globus.org/holotomocupy/examples_synthetic/data/prb_id16a/prb_abs_2048.tiff',
     'https://g-110014.fd635.8443.data.globus.org/holotomocupy/examples_synthetic/data/prb_id16a/prb_phase_2048.tiff',
@@ -166,6 +177,8 @@ rec_args = SimpleNamespace(
     checkpoint_step         = checkpoint_step,
     error_step              = error_step,
     start_iter              = 0,
+    psf_sigma               = psf_sigma,
+    shift_type              = shift_type,
     path_out                = path_out,
     comm                    = comm,
 )
@@ -182,22 +195,22 @@ cl.vars['proj'][:] = proj_gt
 cl.vars['prb'][:]  = prb_gt
 cl.vars['pos'][:]  = cp.array(pos_gt[cl.st_theta:cl.end_theta])
 
-cl.gen_sqrt_data(cl.vars, cl.data)
+cl.gen_data(cl.vars, cl.data)
 
 # ── Add Poisson noise on the intensity ──────────────────────────────────────
 # Per-theta RNG keyed by GLOBAL theta index so each theta's noise realisation
 # is identical regardless of how many MPI ranks split the job (reproducibility).
-# cl.data is sqrt(intensity): square → Poisson(I·photons)/photons → sqrt.
+# cl.data IS the intensity now (F0 is intensity-based), so the Poisson draw is
+# direct -- no square/sqrt round trip.
 if photons is not None:
     seeds = np.random.SeedSequence(20251119).spawn(ntheta)
     for j_local in range(cl.end_theta - cl.st_theta):
         rng = np.random.default_rng(seeds[cl.st_theta + j_local])
-        I   = cl.data[j_local].astype('float32') ** 2
-        I   = rng.poisson(I * photons).astype('float32') / photons
-        cl.data[j_local] = np.sqrt(I)
+        I   = cl.data[j_local].astype('float32')
+        cl.data[j_local] = rng.poisson(I * photons).astype('float32') / photons
     if rank == 0:
         logger.info(f'Poisson noise: {photons} photons/pixel  '
-                    f'(sqrt-data std ≈ 1/(2·sqrt(photons)) = {0.5 / np.sqrt(photons):.4f})')
+                    f'(intensity std ≈ 1/sqrt(photons) = {1.0 / np.sqrt(photons):.4f})')
 
 
 # ── Reconstruction: reset to initial guess, then BH (periodic tiff saves) ────

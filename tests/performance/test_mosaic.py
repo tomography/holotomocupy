@@ -18,7 +18,7 @@ Nothing is read from disk and nothing is forward-modelled:
 
     prb   = 1                      (flat probe, as a from-scratch step6 starts)
     ref   = |D.prb|                (seeds the probe-fit regularizer)
-    data  = random, positive       (sqrt-intensity; values do not affect timing)
+    data  = random, positive       (intensity; values do not affect timing)
     pos   = tile offset + random per-angle encoder jitter
     obj   = 0                      (from-scratch start; no forward model at all)
 
@@ -380,12 +380,12 @@ def synth_pos(st, end, ntheta_global, ss):
 
     scale = np.float32(1.0 / 2**bins)
     out *= scale
-    out[..., 1] += np.float32(rotation_center_shift * scale + 0.5 * (scale - 1))
+    out[..., 1] += np.float32(rotation_center_shift * scale)
     return out
 
 
 def synth_data(out, st, end, ntheta_global, ss):
-    """Fill the pinned [ndist, local_ntheta, nz, n] sqrt-intensity buffer.
+    """Fill the pinned [ndist, local_ntheta, nz, n] intensity buffer.
 
     One random frame per distance, scaled by a per-(angle, distance) factor —
     a memory-bandwidth-bound fill rather than several hundred GB of RNG.

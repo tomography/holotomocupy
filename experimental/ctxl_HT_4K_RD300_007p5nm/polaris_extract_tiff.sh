@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=1:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -43,7 +43,7 @@
 # Nothing outside <rec6_results>/{full,even,odd}/NNNN.tiff is ever touched.
 # ===========================================================================
 
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 NRANKS=${NRANKS:-24}          # ranks per node; 8 per set with the default 3 sets
 NDEPTH=2
 NTHREADS=1                    # numpy/tifffile here are single-threaded copies

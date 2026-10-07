@@ -15,6 +15,7 @@ from .shift_fft import ShiftFFT
 from .chunking import Chunking, _axpby
 from .extra_terms import LaplacianTerm, PrbfitTerm
 from .utils import make_pinned, mshow_approx, redot, reprod, timer
+from .psf import psf_taps as _psf_taps, psf_blur as _psf_blur
 from .mpi_functions import MPIClass
 from .logger_config import logger
 from .conv2d_cufftdx import precompile as cufftdx_precompile
@@ -22,10 +23,6 @@ from .conv2d_cufftdx import precompile as cufftdx_precompile
 np.set_printoptions(legacy="1.25")
 warnings.filterwarnings("ignore", message=".*peer.*")
 cupy.fft.config.get_plan_cache().set_size(0) # dont waste GPU memory
-
-# Floor for |x| in the amplitude data term, see the F0 block below.
-_ABS_EPS = np.float32(1e-20)
-
 
 class Rec:
     # B(y,z) = <y, H(vars)·z> is symmetric, so the three sweeps the classic path
@@ -187,9 +184,43 @@ class Rec:
                                              self.local_nzobj, self.nobj,
                                              self.cl_mpi, self.cl_chunking.gpu_batch,
                                              grad_pad=getattr(self, 'alloc_mode', 'full') != 'gen')
+        # Detector PSF: ONE Gaussian on the detector intensity (see the F0
+        # block), the same at every distance.  An absent key gives sigma = 0,
+        # psf_w is then None and F0 takes its original fast path.
+        # MUST come before PrbfitTerm: the probe-fit term takes the same taps.
+        self.psf_sigma, self.psf_w = _psf_taps(getattr(args, 'psf_sigma', 0.0))
+        if self.psf_w is not None and self.rank == 0:
+            logger.info(
+                f"PSF: one Gaussian on the detector intensity, "
+                f"sigma={self.psf_sigma:g} binned det.px ({self.psf_w.size} "
+                f"taps), the same at every distance")
+
+        # Data-misfit model, 'intensity' (default) or 'amplitude'.  Orthogonal
+        # to psf_sigma above: both models blur the model intensity with the same
+        # K and differ only in the space the comparison is made in (see the F0
+        # block).  An absent key gives 'intensity', so old configs are
+        # bit-for-bit unaffected.  PrbfitTerm follows the same knob, so the two
+        # misfits stay the same shape and lam_prbfit stays a relative weight.
+        self.model = getattr(args, 'model', 'intensity')
+        if self.model not in ('intensity', 'amplitude'):
+            raise ValueError(f"model must be 'intensity' or 'amplitude', "
+                             f"got {self.model!r}")
+        if self.model != 'intensity' and self.rank == 0:
+            logger.info(
+                "misfit model: AMPLITUDE, 1/N sum W (sqrt(K|psi|^2) - sqrt(d))^2"
+                " -- err is ~4x smaller than under the intensity model and the"
+                " two are NOT comparable.  lam_laplacian should be ~4x smaller"
+                " here for the same relative weight; lam_prbfit should NOT be,"
+                " PrbfitTerm follows this knob and rescales with F0.")
+
         if self.lam_prbfit > 0:
+            # Same K as F0.  The measured flat `ref` came off the same detector
+            # through the same partially coherent beam as the data, so the model
+            # for it is K|D.prb|^2, not |D.prb|^2 -- blurring one side of the
+            # misfit and not the other would make the probe absorb the PSF.
             self.cl_prb_term = PrbfitTerm(self.lam_prbfit, self.prb_size,
-                                          self.ndist, self.nz, self.n, self.cl_prop)
+                                          self.ndist, self.nz, self.n, self.cl_prop,
+                                          psf_w=self.psf_w, model=self.model)
 
         self.alloc_arrays()
        
@@ -297,7 +328,7 @@ class Rec:
                                            surfaced as cudaErrorInvalidValue
                                            inside Chunking.p2g.
         linear_batch on vars['proj'] is 3 proj-shape — dominated by cascade.
-        gen_sqrt_data (1 proj + ndistchunk data, as outputs) and min
+        gen_data (1 proj + ndistchunk data, as outputs) and min
         (1 proj + ndistchunk * small) are both under the cascade candidate.
         Any new @gpu_batch caller with a bigger footprint must be added.
         """
@@ -310,6 +341,19 @@ class Rec:
         candidates = [3 * proj_bytes + dist_bytes,   # cascade
                       3 * obj_bytes,                 # lin_obj
                       tomo_bytes]                    # fwd_tomo / adj_tomo
+        # F0's temporaries (|x|^2, J, r, p and the Hessian's second nested
+        # pair) are detector-shaped float32 and live inside the cascade kernel
+        # body.  Each convolve1d allocates a fresh output -- a gather stencil
+        # reads a neighbourhood, so it cannot run in place, and cupyx does not
+        # guard against output aliasing the input; psf_blur is two of them.
+        # Measured by tests/psf/bench_f0_mem.py: dF0 is the peak, 7 of them at
+        # once without a PSF and 8 with, so the 7 below is one light in the
+        # blurred case.  Counted unconditionally.
+        # DEBUG MODE (2026-09-15): with the F0 group unfused (see the comment
+        # above F0), that bench now measures 10 -- every elementwise step keeps
+        # its own full-size temporary.  The 7 here is the FUSED number and is
+        # deliberately left alone; restore the fusion before a production run.
+        candidates[0] += 7 * self.nchunk * self.nz * self.n * 4
         if self.lam_laplacian > 0:
             candidates.append(3 * obj_bytes + 4 * obj_slab)        # gradient_laplacian
             candidates.append(2 * obj_bytes + 8 * obj_slab)        # laplacian hessian3
@@ -945,16 +989,39 @@ class Rec:
             # cancel when beta is large. float64, but warn on a non-positive result
             # (nonconvex) or on heavy cancellation.
             scale = abs(beta * beta * Qee) + abs(2.0 * beta * Bge) + abs(Qgg)
-            if not bottom > 1e-6 * scale:
-                logger.warning(
-                    f"iter={i}: ill-conditioned alpha denominator bottom={bottom:.6e} "
-                    f"from Qgg={Qgg:.6e} Bge={Bge:.6e} Qee={Qee:.6e} beta={beta:.6e}")
+            nonconvex = not bottom > 1e-6 * scale
 
             if check:
                 # etas holds the updated direction, so this is exactly the
                 # sweep compute_alpha would have run.
                 ref_bottom = self.allreduce_scalars(self.hessian(vars, etas, etas))[0]
                 self._log_fused_check(i, "bottom", bottom, ref_bottom)
+
+            if nonconvex:
+                # The quadratic model along eta is concave (bottom < 0) or flat.
+                # Its stationary point is then a MAXIMUM, so top/bottom is a
+                # negative alpha and the update walks uphill -- which is exactly
+                # what a tomo_upsample=2 run does from iteration 0, where the
+                # coarse object grid cannot match the data's fine detail and the
+                # residual-weighted term of d2F0 goes negative over enough of the
+                # detector to flip B(g,g).  Under the INTENSITY misfit that term
+                # is p*Re(conj(z) y) with p = K[W(K|x|^2 - d)], sign-indefinite
+                # wherever the model over-predicts; the other term,
+                # 2 W K[Re(conj(x) z)]^2, is a square and always >= 0.  So the
+                # indefinite part is proportional to the residual and vanishes at
+                # the solution -- the Hessian is PSD there.  (The amplitude misfit
+                # this replaced had the same structure with (1 - d/|x|) in place
+                # of p, plus a d/|x|^3 factor that blew up at small |x|.)
+                #
+                # top = <-grad, eta> > 0 for any descent direction, so |bottom|
+                # keeps the step downhill and of the right magnitude; the model
+                # itself says "go further", but unboundedly so, and there is no
+                # objective evaluation here to backtrack against.
+                logger.warning(
+                    f"iter={i}: non-convex alpha denominator bottom={bottom:.6e} "
+                    f"from Qgg={Qgg:.6e} Bge={Bge:.6e} Qee={Qee:.6e} beta={beta:.6e}"
+                    f" -- stepping along |bottom| instead of taking alpha<0")
+                bottom = abs(bottom) if bottom != 0.0 else 1e-6 * scale
 
             alpha = top / bottom
         return alpha, top, bottom
@@ -1011,6 +1078,13 @@ class Rec:
             top = self._update_etas(grads, etas, beta)
             bottom = self.hessian(vars, etas, etas)
             top, bottom = self.allreduce2(top, bottom)
+            if not bottom > 0.0:
+                # Same non-convex case the fused route guards; see
+                # _compute_step_fused.
+                logger.warning(
+                    f"non-convex alpha denominator bottom={bottom:.6e} "
+                    f"-- stepping along |bottom| instead of taking alpha<0")
+                bottom = abs(bottom) if bottom != 0.0 else 1.0
             alpha = top / bottom
         return alpha, top, bottom
 
@@ -1280,6 +1354,14 @@ class Rec:
         # part2, parallelization over object slices: adjoint Radon
         self.adj_tomo(grads['obj'], self.proj_tmp)
         if hasattr(self, 'cl_lap_term'):
+            # NOTE: unlike the probe term below, this adds its gradient WITHOUT
+            # rho_sq['obj'], while the misfit part of grads['obj'] carries it
+            # (gradproj_out += y[1]*rho_sq['obj'] in gradients_cascade).  The
+            # two halves of grads['obj'] are therefore in the same metric only
+            # because rho[obj] = 1.0 in every config shipped here.  Anyone who
+            # sets rho[obj] != 1 -- or turns estimate_rho back on -- must scale
+            # this call the way cl_prb_term.gradient is scaled, and check
+            # cl_lap_term.hessian/hessian3 at the same time.
             self.cl_lap_term.gradient(grads['obj'])
 
         if self.rank == 0 and hasattr(self, 'cl_prb_term'):
@@ -1443,82 +1525,247 @@ class Rec:
         return stats
 
 
-    ####### F0(x0) = 1/n\|m\cdot(|x0|-d)\|_2^2
+    ####### F0(x0) = 1/n \|m . g(K|x0|^2, d)\|_2^2
+    #
+    # TWO MISFIT MODELS, selected by self.model ('intensity' or 'amplitude').
+    # They share everything except the last pointwise step.  With I = |x|^2,
+    # J = K I the blurred MODEL intensity, a = sqrt(J) the model amplitude,
+    # s = sqrt(d) the measured amplitude and W = my*mx the detector mask:
+    #
+    #   intensity   F0 = 1/N sum W (a^2 - d)^2 = 1/N sum W (J - d)^2
+    #   amplitude   F0 = 1/N sum W (a   - s)^2
+    #
+    # PSF WORKS IN BOTH, and sits in the same place in both.  The focal spot and
+    # the detector PSF blur INTENSITY, incoherently, so neither can be folded
+    # into cl_prop.D (which is coherent) and the blur's only legal home is here,
+    # on I.  Both are Gaussian, so they are carried as ONE Gaussian K (see
+    # _psf_blur; it is self-adjoint, so K^T is literally K), the same at every
+    # distance, and K is the identity when no blur is configured.  The amplitude
+    # model then compares sqrt(K I) against sqrt(d): the blur stays on intensity
+    # where the physics puts it, and only the COMPARISON moves to amplitude.  At
+    # psf_sigma = 0 that is exactly the historical amplitude misfit, ||x| - s|^2.
+    #
+    # d IS THE MEASURED INTENSITY IN BOTH.  reader.py used to take the sqrt on
+    # load, back when the only misfit was the amplitude one; it no longer does,
+    # and gen_data generates intensity to match.  Nothing squares d, and the
+    # amplitude path takes its own sqrt here.
+    #
+    # WHICH ONE IS RIGHT is a noise question, not a physics question -- the
+    # forward model is identical.  (a^2 - d) = (a - s)(a + s), so the intensity
+    # misfit is the amplitude misfit carrying an extra per-pixel weight
+    # (a + s)^2 ~ 4d.  That is the Poisson variance, so amplitude is the
+    # correctly weighted least squares under counting noise (sqrt is its
+    # variance-stabilizing transform) and intensity is correct when read noise
+    # dominates.  See config._parse_model for what this does to err, to
+    # lam_prbfit/lam_laplacian (divide by ~4 for amplitude) and to rho (nothing).
     #
     # m = my*mx is the out-of-grid detector mask from _build_data_mask, kept as
     # the two separable factors self._mask_y [chunk,nz,1] and self._mask_x
-    # [chunk,1,n] and broadcast by cp.fuse. They are read off self, like
-    # self._dist_idx. All four functions weight the POINTWISE term before the
-    # reduction, so they stay exact derivatives of the masked F0; the mask's own
-    # dependence on pos is ignored, which is why it must stay frozen.
-    # 1/data_size still counts every pixel, masked or not: renormalizing would
-    # silently rescale lam_prbfit, lam_laplacian and rho.
+    # [chunk,1,n] and broadcast by the product W = my*mx.  They are read off
+    # self, like
+    # self._dist_idx.  1/data_size still counts every pixel, masked or not:
+    # renormalizing would silently rescale lam_prbfit, lam_laplacian and rho.
     #
-    # |x| is clamped to _ABS_EPS before every division.  The mask multiplies the
-    # pointwise term LAST, so a pixel with |x|=0 would yield inf and then
-    # 0*inf = nan -- the mask converts the blow-up instead of removing it.  Those
-    # zeros only exist since mask_oob, and they sit exactly over the mirrored
-    # samples where |x| is meaningless.  The floor is picked for float32: the
-    # quotient d/|x| must stay well inside 3.4e38, so with d = O(1) and the
-    # y,z factors = O(1) a floor of 1e-20 leaves ~18 orders of headroom, while
-    # any physically meaningful amplitude here is O(0.1-10) -- the clamp is
-    # inert wherever the model is valid.  (l0 = x/max(|x|,eps) also stays
-    # bounded by 1 by construction.)  Do not push the floor much below this:
-    # 1e-30 is a perfectly representable float32, but d/1e-30 only leaves ~1e8
-    # of headroom before the products overflow to inf again.
-    @staticmethod
-    @cp.fuse()
-    def _F0_fused(x, d, my, mx):
-        t = cp.abs(x) - d
-        return (my * mx) * t * t
+    # ONE SET OF DERIVATIVES COVERS BOTH.  Write the misfit as 1/N sum W g(J),
+    # and let u = Re(conj(x) z), v = Re(conj(x) y).  Since dJ[z] = 2 K(u),
+    #
+    #   F0        = 1/N sum W g(J)
+    #   dF0[y]    = 4/N sum p v                                  p = K[W g'/2]
+    #   d2F0[y,z] = 4/N sum { 2 t v + p Re(conj(z) y) }          t = K[W (g''/2) K u]
+    #                                        (+ 4/N sum p Re(conj(x) w))
+    #
+    # so the two models differ ONLY in the two pointwise weights g'/2 and g''/2.
+    # Below, each model gets its own four functions with those weights written
+    # out, and F0/dF0/d2F_dF0/gF0 only pick between the two families:
+    #
+    #                g               g'/2                g''/2
+    #   intensity    (J - d)^2       J - d               1
+    #   amplitude    (sqrt J - s)^2  (a - s)/(2a)        s/(4 a^3)
+    #
+    # Substituting the intensity row reproduces the previous code exactly.
+    #
+    # THE AMPLITUDE PATH DIVIDES and the intensity path does not.  a can be zero
+    # (a masked pixel, a true zero of the propagated field) and 1/a^3 makes the
+    # curvature blow up long before that, which is the reason this misfit was
+    # dropped in the first place.  Both denominators are therefore floored at
+    # _AMP_FLOOR; F0 itself is left exact, so only the derivatives are modified,
+    # and only on pixels where the model predicts essentially no signal.  With
+    # flat-field-normalised data a ~ 1, so the floor is ~3 orders below anything
+    # physical and is in practice never active.
+    #
+    # Note g''/2 >= 0 for BOTH models, so the t term is a genuine square in the
+    # quadratic form (sum W (g''/2) (K u)^2 >= 0) and all the indefiniteness
+    # lives in p, which is proportional to the residual and vanishes at the
+    # solution -- see the non-convex branch in _compute_step_fused.
+    #
+    # Two things that are easy to get wrong:
+    #  * W sits INSIDE the outer K, in both p and t.  Masking the blurred result
+    #    afterwards instead would not be the derivative of anything.  The
+    #    p-weighted terms must therefore NOT be masked again: p already carries
+    #    W.  Likewise W sits between the Hessian's two convolutions.
+    #  * the Hessian needs TWO nested convolutions; it is not a substitution
+    #    into a pointwise kernel.
 
-    @nvtx.annotate("F0", color="green")
+    # Floor on the model amplitude a = sqrt(K|x|^2) in the amplitude model's two
+    # denominators.  Data are flat-field normalised (a ~ 1), so this is ~1e-3 of
+    # anything physical; it caps the curvature weight s/(4a^3) at ~2.5e8*s
+    # instead of letting it diverge.
+    _AMP_FLOOR = np.float32(1e-3)
+
+    def _blur(self, x):
+        """K x, the one Gaussian on the detector intensity, identity if unset.
+
+        K^T = K (see _psf_blur), so this one call serves both directions."""
+        return x if self.psf_w is None else _psf_blur(x, self.psf_w)
+
+    # ---- the misfit and its derivatives: ONE function per model -----------
+    # DEBUG MODE (2026-09-15): no helper kernels, no @cp.fuse(), and the two
+    # misfit models have SEPARATE functions -- *_int for intensity, *_amp for
+    # amplitude.  Each of the eight spells out its whole formula in one body:
+    # the mask product W, the blurs, that model's weights, the reduction.  A
+    # formula can be checked by reading a single function, stepped into, and
+    # called on float64 input; no body carries a model branch, and nothing in
+    # the group calls anything in the group.
+    #
+    # F0/dF0/d2F_dF0/gF0 are one-line dispatchers on self.model and are what
+    # the cascade calls -- the only four model branches in the group.  The
+    # price of the split is that p = K[W g'/2] is written out six times (three
+    # derivatives x two models); that is deliberate, and it is what makes each
+    # function readable on its own.
+    #
+    # The previous structure -- eight @cp.fuse()d static kernels behind
+    # _pw/_cw/_F0_p, one code path for both models -- is in git; restore it
+    # before any production run.  Fused, cp.fuse folded the mask broadcast and
+    # the sqrt into one elementwise kernel, which is why the amplitude forms
+    # cost the same memory traffic as the intensity ones and why sqrt(d) is
+    # recomputed rather than stored: these kernels are bandwidth-bound and d is
+    # a full detector chunk.
+    #
+    # self._blur is NOT part of this group: it is K itself, shared with
+    # PrbfitTerm and with the err reduction, and it stays a method.
+
     def F0(self, x, d):
-        """In: (x0), Out: const"""
-        return 1 / self.data_size * cp.sum(
-            self._F0_fused(x, d, self._mask_y, self._mask_x))
+        """In: (x0), Out: const.  Dispatch on self.model."""
+        return (self.F0_amp if self.model == 'amplitude' else self.F0_int)(x, d)
 
-    @staticmethod
-    @cp.fuse()
-    def _dF0_fused(x, d, my, mx):
-        return (my * mx) * (x - d * (x / cp.maximum(cp.abs(x), _ABS_EPS)))
-
-    @nvtx.annotate("dF0", color="green")
     def dF0(self, x, y, d, return_x=False):
-        """In: (x0,y0), Out: const"""
-        return 2 / self.data_size * redot(
-            self._dF0_fused(x, d, self._mask_y, self._mask_x), y)
+        """In: (x0,y0), Out: const.  Dispatch on self.model."""
+        f = self.dF0_amp if self.model == 'amplitude' else self.dF0_int
+        return f(x, y, d)
 
-    @staticmethod
-    @cp.fuse()
-    def _d2F_dF0_fused(x, y, z, w, d, my, mx):
-        absval = cp.maximum(cp.abs(x), _ABS_EPS)
-        l0 = x / absval
-        d0 = d / absval
-        v = (1 - d0) * reprod(y, z) + d0 * reprod(l0, y) * reprod(l0, z)
-        if w is not None:
-            v += reprod(x - d * l0, w)
-        return (my * mx) * v
-
-    @nvtx.annotate("d2F0_dF0", color="purple")
     def d2F_dF0(self, x, y, z, w, d):
-        """In: (x0,y0,z0,w0), Out: const"""
-        return 2 / self.data_size * cp.sum(
-            self._d2F_dF0_fused(x, y, z, w, d, self._mask_y, self._mask_x))
+        """In: (x0,y0,z0,w0), Out: const.  Dispatch on self.model."""
+        f = self.d2F_dF0_amp if self.model == 'amplitude' else self.d2F_dF0_int
+        return f(x, y, z, w, d)
 
-    @staticmethod
-    @cp.fuse()
-    def _gF0_fused(x, y, my, mx, scale):
-        td = y * (x / cp.maximum(cp.abs(x), _ABS_EPS))
-        return (scale * (my * mx)) * (x - td)
-
-    @nvtx.annotate("gF0", color="green")
     def gF0(self, x, y):
-        """In: x, y = F0(F1(..(x)))), Out: y0"""
+        """In: x, y = F0(F1(..(x)))), Out: y0.  Dispatch on self.model."""
+        return (self.gF0_amp if self.model == 'amplitude' else self.gF0_int)(x, y)
+
+    # ---- intensity model:  F0 = 1/N sum W (J - d)^2,  J = K|x|^2 ----------
+
+    @nvtx.annotate("F0_int", color="green")
+    def F0_int(self, x, d):
+        """F0 = 1/N sum W (J - d)^2,   J = K|x|^2,  W = my*mx."""
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        t = J - d
+        return 1 / self.data_size * cp.sum(W * t * t)
+
+    @nvtx.annotate("dF0_int", color="green")
+    def dF0_int(self, x, y, d):
+        """dF0[y] = 4/N sum p Re(conj(x) y),   p = K[W (J - d)]."""
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        p = self._blur(W * (J - d))
+        return 4 / self.data_size * redot(p * x, y)
+
+    @nvtx.annotate("d2F0_dF0_int", color="purple")
+    def d2F_dF0_int(self, x, y, z, w, d):
+        """d2F0[y,z] = 4/N sum { 2 t Re(conj(x) y) + p Re(conj(z) y) }
+                       + 4/N sum p Re(conj(x) w)        (the w slot, = dF0[w])
+
+            p = K[W (J - d)]
+            t = K[W K Re(conj(x) z)]     <- TWO nested blurs, the mask between
+                                            them; the curvature weight is 1
+        """
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        p = self._blur(W * (J - d))
+        t = self._blur(W * self._blur(reprod(x, z)))
+        v = 2 * t * reprod(x, y) + p * reprod(z, y)
+        if w is not None:
+            v += p * reprod(x, w)
+        return 4 / self.data_size * cp.sum(v)
+
+    @nvtx.annotate("gF0_int", color="green")
+    def gF0_int(self, x, y):
+        """grad F0 = (4/N) p x,   p = K[W (J - d)].  y is the data d."""
+        d = y
         x = self.apply_F_from(x, 1)
-        return self._gF0_fused(x, y, self._mask_y, self._mask_x,
-                               np.float32(2 / self.data_size))
-    
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        p = self._blur(W * (J - d))
+        return (np.float32(4 / self.data_size) * p) * x
+
+    # ---- amplitude model:  F0 = 1/N sum W (a - sqrt(d))^2,  a = sqrt(K|x|^2)
+    # a is floored at _AMP_FLOOR wherever it appears in a DENOMINATOR (the two
+    # derivatives); F0 itself is left exact.
+
+    @nvtx.annotate("F0_amp", color="green")
+    def F0_amp(self, x, d):
+        """F0 = 1/N sum W (sqrt(J) - sqrt(d))^2,   J = K|x|^2,  W = my*mx."""
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        t = cp.sqrt(J) - cp.sqrt(d)
+        return 1 / self.data_size * cp.sum(W * t * t)
+
+    @nvtx.annotate("dF0_amp", color="green")
+    def dF0_amp(self, x, y, d):
+        """dF0[y] = 4/N sum p Re(conj(x) y),   p = K[W (a - sqrt(d))/(2a)],
+        a = max(sqrt(J), floor)."""
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        a = cp.maximum(cp.sqrt(J), self._AMP_FLOOR)
+        p = self._blur(W * 0.5 * (1.0 - cp.sqrt(d) / a))
+        return 4 / self.data_size * redot(p * x, y)
+
+    @nvtx.annotate("d2F0_dF0_amp", color="purple")
+    def d2F_dF0_amp(self, x, y, z, w, d):
+        """d2F0[y,z] = 4/N sum { 2 t Re(conj(x) y) + p Re(conj(z) y) }
+                       + 4/N sum p Re(conj(x) w)        (the w slot, = dF0[w])
+
+            p = K[W (a - sqrt(d))/(2a)]
+            t = K[W (sqrt(d)/(4 a^3)) K Re(conj(x) z)]   <- TWO nested blurs;
+                                                            the curvature weight
+                                                            sits BETWEEN them,
+                                                            in the mask's slot
+        """
+        W = self._mask_y * self._mask_x
+        # J is built once and kept live: the curvature weight needs it as well
+        # as p does.  u is the INNER convolution of the t term.
+        J = self._blur(reprod(x, x))
+        u = self._blur(reprod(x, z))
+        a = cp.maximum(cp.sqrt(J), self._AMP_FLOOR)
+        p = self._blur(W * 0.5 * (1.0 - cp.sqrt(d) / a))
+        t = self._blur(W * (0.25 * cp.sqrt(d) / (a * a * a)) * u)
+        v = 2 * t * reprod(x, y) + p * reprod(z, y)
+        if w is not None:
+            v += p * reprod(x, w)
+        return 4 / self.data_size * cp.sum(v)
+
+    @nvtx.annotate("gF0_amp", color="green")
+    def gF0_amp(self, x, y):
+        """grad F0 = (4/N) p x,   p = K[W (a - sqrt(d))/(2a)].  y is the data d."""
+        d = y
+        x = self.apply_F_from(x, 1)
+        W = self._mask_y * self._mask_x
+        J = self._blur(reprod(x, x))
+        a = cp.maximum(cp.sqrt(J), self._AMP_FLOOR)
+        p = self._blur(W * 0.5 * (1.0 - cp.sqrt(d) / a))
+        return (np.float32(4 / self.data_size) * p) * x
+
+
     ####### x0 = F1(x11,x12) = D(x11\cdot x12)
     @nvtx.annotate("F1", color="green")
     def F1(self, x):
@@ -1966,10 +2213,15 @@ class Rec:
                     self.table.to_csv(f"{self.path_out}/conv_bin{self.bin}.csv",
                                       index=False)
 
-    def gen_sqrt_data(self, vars, out):
+    def gen_data(self, vars, out):
         """Generate synthetic data. Distances run inside the theta-chunk loop,
         ndistchunk per pass, so the vars['proj'] chunk is uploaded once for all
-        of them instead of once per distance."""
+        of them instead of once per distance.
+
+        Writes INTENSITY, K|psi|^2 -- the same convention reader.py now uses and
+        the same quantity F0 compares against, blur included.  (It wrote the
+        amplitude, and was called gen_sqrt_data, while the misfit was on
+        amplitudes.)"""
 
         self._ensure_tp(vars)
         self.eff_demag[:] = self._eff_demag_from_tp(vars['tp'])
@@ -1997,7 +2249,9 @@ class Rec:
                     self.apply_F_cache_reset()
                     x = [c_prb[j], c_proj, c_pos[j], c_tp[j]]
                     y = self.apply_F_from(x, 1)
-                    o[j][:] = cp.abs(y)
+                    # K|y|^2, not |y|^2: synthetic data has to carry the same
+                    # blur the model applies, or every test against it is vacuous
+                    o[j][:] = self._blur(reprod(y, y))
 
             ks = range(k0, k1)
             _gen_data_dists(self,

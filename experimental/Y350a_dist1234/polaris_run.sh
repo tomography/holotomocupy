@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -12,7 +12,7 @@
 CONFIG=config_step6.conf
 SCRIPT=step6.py
 # Software environment (modules + conda env). See the Polaris setup notes.
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 # --------------------------
 
 NNODES=$(wc -l < $PBS_NODEFILE)
@@ -44,11 +44,6 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 [ -r "${HTC_ENV}" ] || { echo "ERROR: HTC_ENV not readable: ${HTC_ENV}"; exit 1; }
 source "${HTC_ENV}"
 echo "python: $(which python)"
-
-# Fallback: ALCF-provided base conda + venv layered on top
-# module use /soft/modulefiles;  module load conda; conda activate base
-# CONDA_NAME=$(echo ${CONDA_PREFIX} | tr '\/' '\t' | sed -E 's/mconda3|\/base//g' | awk '{print $NF}')
-# source "/home/vvnikitin/venvs/${CONDA_NAME}/bin/activate"
 
 # mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf"
 mpiexec -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/${SCRIPT}" "${SCRIPT_DIR}/${CONFIG}"

@@ -143,7 +143,7 @@ cl = Rec(a)
 cl.vars['obj'][:] = obj[cl.st_obj:cl.end_obj]
 cl.vars['prb'][:] = prb
 cl.vars['pos'][:] = pos[cl.st_theta:cl.end_theta].transpose(1, 0, 2)
-cl.gen_sqrt_data(cl.vars, cl.data)
+cl.gen_data(cl.vars, cl.data)
 cl.cl_prb_term.gen_sqrt_ref(cl.vars['prb'], cl.ref)
 
 # Start from a *good* guess, like the real run does (Paganin volume + flat-field

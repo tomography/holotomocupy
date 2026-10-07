@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -14,19 +14,14 @@
 #
 #     qsub polaris_run.sh
 #
-# THIS IS THE tomo_upsample=2 ARM: the object x/y grid is half the projection
-# plane (632/1264/2528 against 1264/2528/5056), and it writes ..._rec6_u2.  The
-# historical tomo_upsample=1 arm is polaris_run_u1.sh -> ..._rec6_u1.  The two
-# are
-# run side by side and compared; they must not share an output directory,
-# because their checkpoints have incompatible object shapes and share the
-# iteration numbering.
+# tomo_upsample=2: the object x/y grid is half the projection plane
+# (632/1264/2528 against 1264/2528/5056), writing ..._rec6_u2.
 #
-# Steps 1-5 are shared by the two arms and are NOT affected by tomo_upsample:
-# step 5 writes its Paganin+FBP init on the projection grid as it always has,
-# and Reader.read_obj averages it 2x2 in x/y when a step-6 config asks for
-# tomo_upsample=2.  So steps15 does not have to be re-run for either arm, and
-# polaris_run_u1.sh has its steps15 line commented out.
+# Steps 1-5 are NOT affected by tomo_upsample -- step 5 writes its Paganin+FBP
+# init on the projection grid, and Reader.read_obj averages it 2x2 in x/y when
+# a step-6 config asks for tomo_upsample=2.  So steps15 need not be re-run and
+# its line below is commented out; uncomment it only for a sample that has
+# never been preprocessed.
 #
 # To run only part of it -- steps 1-5 already done, or resuming after a
 # preemption -- COMMENT OUT the mpiexec lines at the bottom that you do not
@@ -40,7 +35,7 @@
 
 # --- user configuration ---
 # Software environment (modules + conda env). See the Polaris setup notes.
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 # HEALTHCHECK=0  skips the ~30 s GPU probe;  RUN_NODES=N  uses N healthy nodes.
 # --------------------------
 
@@ -92,8 +87,8 @@ fi
 # --- the pipeline; comment out a line to skip that stage ---------------------
 
 # EDF->HDF5, preprocess, shifts, binned data, Paganin+FBP for bins 2,1,0
-echo "=== steps15 START $(date) ==="
-mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+# echo "=== steps15 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
 
 # bin 2: 4x4  n=1024   (iteration range: start_iter/niter in the config)
 echo "=== bin2 START $(date) ==="

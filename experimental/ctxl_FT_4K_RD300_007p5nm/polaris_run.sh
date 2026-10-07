@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -A 14238
+#PBS -A 17445
 #PBS -l select=2:system=polaris
 #PBS -l place=scatter
 #PBS -l filesystems=home:eagle
@@ -32,7 +32,7 @@
 
 # --- user configuration ---
 # Software environment (modules + conda env). See the Polaris setup notes.
-HTC_ENV=${HTC_ENV:-/eagle/APS_IRI/vvnikitin/sw/env.sh}
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
 # HEALTHCHECK=0  skips the ~30 s GPU probe;  RUN_NODES=N  uses N healthy nodes.
 # --------------------------
 
@@ -66,12 +66,6 @@ echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRA
 source "${HTC_ENV}"
 echo "python: $(which python)"
 
-# What step 3 is about to read -- shift files, row counts, bin factors, the
-# resulting cshifts_final.  Pure numpy on rank 0's inputs, a few seconds, no
-# GPU; it only prints.  Run it first so a missing or wrongly-scaled shift file
-# shows up here rather than 20 minutes into steps15.
-python "${rec_dir}/check_data_read.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
-
 # Drop nodes whose GPUs cannot take a CUDA context.  PBS has no Slurm-style
 # --exclude -- `-l select=` can pin a host but cannot negate one -- so a node
 # that comes up with cudaErrorDevicesUnavailable can only be filtered from
@@ -100,11 +94,11 @@ mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind 
 
 # bin 2: 4x4  n=1024  nobj=1200  iters    0 -> 1024
 echo "=== bin2 START $(date) ==="
-# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_binned_bin2.conf" || exit $?
 
 # bin 1: 2x2  n=2048  nobj=2400  iters 1024 -> 1280
 echo "=== bin1 START $(date) ==="
-# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_binned_bin1.conf" || exit $?
 
 # bin 0: 1x1  n=4096  nobj=4800  iters 1280 -> 1536
 echo "=== bin0 START $(date) ==="

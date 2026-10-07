@@ -5,7 +5,7 @@
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:eagle
 #PBS -q prod
-#PBS -A 14238
+#PBS -A 17445
 #PBS -j oe
 # Mosaic perf benchmark on Polaris (4 x A100 40 GB, 512 GB per node).  Same
 # measurement as run_mosaic.sh; nchunk is sized for a 40 GB card and the ranks

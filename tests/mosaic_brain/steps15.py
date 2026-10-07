@@ -170,7 +170,7 @@ origin_y = (nzobj_bin - nobj_tile_bin) // 2 - ioff[:, 0]
 origin_x = (nobj_bin  - nobj_tile_bin) // 2 - ioff[:, 1]
 
 r_np  = shifts[:, local_ids] * np.float32(scale) + frac[:, None, None, :]
-r_np[..., 1] += np.float32(args.rotation_center_shift * scale + 0.5 * (scale - 1))
+r_np[..., 1] += np.float32(args.rotation_center_shift * scale)
 r_gpu = [cp.asarray(r_np[t]) for t in range(ntiles)]
 
 # tile row / column, from the "{row}_{col}" names, for the seam feather
@@ -204,7 +204,7 @@ info(f'{ntheta5}/{ntheta0} angles, {nloc} on rank 0, paganin={args.paganin}')
 # ---------------------------------------------------------------------------
 cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
 
-cl_shift = Shift(n_bin, nobj_tile_bin, n_bin, nobj_tile_bin, 'complex64')
+cl_shift = Shift(n_bin, nobj_tile_bin, n_bin, nobj_tile_bin)
 
 npad_bin = max(4, n_bin // 16)     # blend width between distances, in _stitch
 _quintic_cache = {}

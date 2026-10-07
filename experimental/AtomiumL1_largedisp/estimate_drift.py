@@ -458,7 +458,7 @@ else:
 dist_base = distances / norm_magnifications**2
 
 r     = (cshifts * scale).astype('float32')
-r[..., 1] += args.rotation_center_shift * scale + 0.5 * (scale - 1)
+r[..., 1] += args.rotation_center_shift * scale
 r_gpu = cp.array(r)
 
 

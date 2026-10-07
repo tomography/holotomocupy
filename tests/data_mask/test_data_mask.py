@@ -13,16 +13,24 @@ slightly and the y and x bounds computed independently.
 Rec._build_data_mask gives the unsupported pixels zero weight in the data fit;
 the F0 family then carries that weight through F0, dF0, d2F_dF0 and gF0.
 
+F0 is the INTENSITY misfit 1/N sum W (K|x|^2 - d)^2 with W = my*mx, so the mask
+enters in exactly two places inside each of F0/dF0/d2F_dF0/gF0: on the misfit
+integrand, and on the residual weight p = K[W(J-d)] -- both of which see the
+blurred intensity J rather than x -- plus once more between the Hessian's two
+convolutions.  Nothing masks the DERIVATIVE terms again: they are weighted by p,
+which already carries W, and masking them twice would square it.  That is the
+trap this section is guarding.
+
 The mask is per (distance, angle) and axis-separable, so it is stored as the
 two 1-D factors (mask_1d) plus the box they came from (mask_box), never as a
 dense [ndist, ntheta, nz, n] array.
 
 Four things are checked:
 
-  1. cp.fuse broadcasts the [chunk, nz, 1] and [chunk, 1, n] mask factors
-     against the [chunk, nz, n] arrays the cascade kernels carry, and the
-     masked-out pixels come back exactly zero from all four kernels -- not
-     merely small.
+  1. The [chunk, nz, 1] and [chunk, 1, n] mask factors broadcast against the
+     [chunk, nz, n] arrays the cascade carries; gF0 comes back exactly zero on
+     the masked-out pixels -- not merely small -- and the masked-out pixels of
+     x cannot move F0, dF0 or d2F_dF0 at all, however large the perturbation.
   2. dF0 and d2F_dF0 are still the first and second derivatives of the MASKED
      F0 (central differences, float64 accumulation).
   3. The geometry, per angle, against a brute-force evaluation of the sampling
@@ -41,11 +49,11 @@ from mpi4py import MPI
 
 sys.path.insert(0, '../..')
 from holotomocupy.rec_mpi import Rec
-from holotomocupy.utils import redot
+from holotomocupy.utils import redot, reprod
 
 
 def check_kernels():
-    """1. broadcasting + exact zeros on masked pixels; 2. derivatives."""
+    """1. masked pixels carry zero weight; 2. derivatives of the masked F0."""
     chunk, nz, n = 3, 16, 20
     rng = cp.random.RandomState(0)
     def c(): return (rng.rand(chunk, nz, n) + 1j * rng.rand(chunk, nz, n)).astype('complex64')
@@ -59,35 +67,63 @@ def check_kernels():
         my[j, y0:y1, 0] = 1
         mx[j, 0, x0:x1] = 1
     m = my * mx                                        # [chunk, nz, n]
+    N = chunk * nz * n
 
-    f  = Rec._F0_fused(x, d, my, mx)
-    g  = Rec._dF0_fused(x, d, my, mx)
-    gg = Rec._gF0_fused(x, y, my, mx, np.float32(2.0))
-    h  = Rec._d2F_dF0_fused(x, y, z, w, d, my, mx)
-    assert f.shape == g.shape == gg.shape == h.shape == x.shape
+    # No blur here: K = identity, so J = |x|^2 and p = W(J-d).  The blur itself
+    # is tests/psf/'s job; what this file owns is the mask riding through
+    # F0/dF0/d2F_dF0/gF0, which is the same algebra either way.
+    rc = object.__new__(Rec)
+    rc.psf_w = None
+    rc.model = 'intensity'
+    rc._mask_y, rc._mask_x = my, mx
+    rc.data_size = N
+    rc.apply_F_from = lambda v, i: v    # gF0's cascade step, identity here
 
-    e_f  = float(cp.abs(f  - m * (cp.abs(x) - d)**2).max())
-    e_g  = float(cp.abs(g  - m * (x - d * (x / cp.abs(x)))).max())
-    e_gg = float(cp.abs(gg - 2.0 * m * (x - y * (x / cp.abs(x)))).max())
-    print(f"broadcast vs explicit: F0 {e_f:.3g}  dF0 {e_g:.3g}  gF0 {e_gg:.3g}")
-    assert e_f < 1e-6 and e_g == 0.0 and e_gg == 0.0
+    # ---- F0 and gF0 against the explicit masked formulas -----------------
+    # Relative bars: the intensity form squares |x|, so the integrand is
+    # O(|x|^4) ~ 20 here and a float32 ulp on it is ~2e-6 in absolute terms.
+    m64 = m.astype('float64')
+    J64 = reprod(x.astype('complex128'), x.astype('complex128'))
+    d64 = d.astype('float64')
+    ref_F0 = float(cp.sum(m64 * (J64 - d64) ** 2)) / N
+    ref_g = (4.0 / N) * (m64 * (J64 - d64)) * x.astype('complex128')
+
+    got_F0 = float(rc.F0(x, d))
+    gg = rc.gF0(x, d)
+    assert gg.shape == x.shape
+    e_f = abs(got_F0 - ref_F0) / abs(ref_F0)
+    e_g = float(cp.abs(gg - ref_g).max()) / float(cp.abs(ref_g).max())
+    print(f"broadcast vs explicit: F0 {e_f:.3g}  gF0 {e_g:.3g}  (relative)")
+    assert e_f < 1e-6 and e_g < 1e-6
 
     off = cp.broadcast_to((m == 0), x.shape)
-    for name, arr in (("F0", f), ("dF0", g), ("gF0", gg), ("d2F_dF0", h)):
-        bad = float(cp.abs(arr[off]).max())
-        print(f"{name:>9}: max|value| on masked-out pixels = {bad:g}")
-        assert bad == 0.0
+    bad = float(cp.abs(gg[off]).max())
+    print(f"     gF0: max|value| on masked-out pixels = {bad:g}")
+    assert bad == 0.0
 
-    # float64 accumulation: the second difference cancels ~6 digits
+    # The masked-out pixels of x must not reach any of the four values.  W = 0
+    # there exactly, so a 100x perturbation has to leave them BIT-identical --
+    # the summation order does not change.
+    xp = x + np.float32(100.0) * c() * (m == 0)
+    same = ((float(rc.F0(xp, d)) == got_F0)
+            and (float(rc.dF0(xp, y, d)) == float(rc.dF0(x, y, d)))
+            and (float(rc.d2F_dF0(xp, y, z, w, d))
+                 == float(rc.d2F_dF0(x, y, z, w, d))))
+    print(f"  100x perturbation on masked-out pixels: values identical = {same}")
+    assert same
+
+    # ---- 2. dF0 and d2F_dF0 are the derivatives of the MASKED F0 ---------
+    # The second difference cancels ~6 digits, so F0 is evaluated in float64 --
+    # the same method, handed complex128 input (dF0 goes through redot and stays
+    # float32, which is 1e-7 relative and far inside the bar below).
+    x64, y64 = x.astype('complex128'), y.astype('complex128')
     def F(t):
-        return float(cp.sum(Rec._F0_fused(x + np.float32(t) * y, d, my, mx),
-                            dtype=cp.float64))
+        return float(rc.F0(x64 + t * y64, d64))
     t = 1e-2
     num1 = (F(t) - F(-t)) / (2 * t)
-    ana1 = 2 * float(redot(Rec._dF0_fused(x, d, my, mx), y))
+    ana1 = float(rc.dF0(x, y, d))
     num2 = (F(t) - 2 * F(0) + F(-t)) / t**2
-    ana2 = 2 * float(cp.sum(Rec._d2F_dF0_fused(x, y, y, None, d, my, mx),
-                            dtype=cp.float64))
+    ana2 = float(rc.d2F_dF0(x, y, y, None, d))
     r1, r2 = abs(num1 - ana1) / abs(ana1), abs(num2 - ana2) / abs(ana2)
     print(f"  dF0: numeric={num1:.8e} analytic={ana1:.8e} rel={r1:.2e}")
     print(f"d2F0 : numeric={num2:.8e} analytic={ana2:.8e} rel={r2:.2e}")

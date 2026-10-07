@@ -122,31 +122,38 @@ def main():
     rel = float(cp.linalg.norm(fd - fc) / cp.linalg.norm(fc))
     check("shared spectrum of nd=2n matches nd=n", rel < 1e-3, f"rel={rel:.2e}")
 
-    # ---- 4. the |f| >= 1/2 bins are empty (band-limited model) --------------
-    # Those bins only exist at nd > n and lie outside the padded FFT's Cartesian
-    # square.  The object lives on the n grid, so it is band-limited to
-    # |f| < 1/2 and the gather kernel zeroes them: the sinogram is the
-    # band-limited interpolation of the coarse one onto the nd grid.
-    #
-    # Letting the index wrap instead -- the delta-comb model -- makes the
-    # gathered spectrum n-periodic, and its length-2n inverse transform is a
-    # comb with every odd detector sample exactly zero.  Half the psi plane then
-    # carries no object, and the BH solver stalls with the object frozen.  That
-    # is what this check exists to catch.
-    print("4. bins with |f| >= 1/2 are empty (band-limited model)")
+    # ---- 4. the |f| >= 1/2 bins, and no combs at theta = 0 / 90 ------------
+    # Bins with |f| >= 1/2 only exist at nd > n.  The gather keeps the ones
+    # whose Cartesian coordinate is still inside the padded FFT square -- the
+    # corners of the square are real, recoverable content -- and SKIPS the
+    # rest rather than wrapping them.  So the outer band is populated, but by
+    # signal, not by aliased replicas.
+    print("4. outer bins populated, and no combs on the axes")
     u = rand_obj(nz, nc, 5)
     cl = Tomo(nc, nz, theta, -1, nd=n)
     d = cl.R(u)
     f = cp.fft.fftshift(cp.fft.fft(d, axis=-1), axes=-1)
     outer = cp.concatenate([f[..., :nc // 2], f[..., nc // 2 + nc:]], axis=-1)
     frac = float(cp.linalg.norm(outer) / cp.linalg.norm(f))
-    check("outer-bin energy fraction is zero", frac < 1e-5, f"frac={frac:.3e}")
-    # The direct real-space symptom of a wrapping kernel: a comb.
-    s = d.real
-    odd = float(cp.abs(s[..., 1::2]).max())
-    even = float(cp.abs(s[..., 0::2]).max())
-    check("no comb: odd detector samples are populated", odd > 0.5 * even,
-          f"|odd|max={odd:.4f} |even|max={even:.4f}")
+    check("outer-bin energy fraction is non-zero", frac > 1e-3, f"frac={frac:.3e}")
+
+    # THE REGRESSION THIS GUARDS.  When the gather WRAPPED instead of skipping,
+    # theta = 0 and 90 deg -- and only there -- wrapped exactly onto themselves
+    # (the shift 2n*cos(theta) is 0 mod 2n only for cos/sin in {0,+-1}), so
+    # those two rows read back an n-periodic spectrum and came out of the
+    # length-nd inverse transform as combs, every odd detector sample exactly
+    # zero.  Two projections per scan were destroyed, the two aligned with x
+    # and y, which is what put high-frequency vertical and horizontal line
+    # artifacts in the ctxl tomo_upsample=2 reconstructions.  All three rows
+    # must now be fully populated.
+    th2 = np.array([0.0, np.pi / 4, np.pi / 2], dtype='float32')
+    cl2 = Tomo(nc, 1, th2, -1, nd=n)
+    s2 = cl2.R(u[:1]).real
+    ratio = [float(cp.abs(s2[k, 0, 1::2]).mean() / cp.abs(s2[k, 0, 0::2]).mean())
+             for k in range(3)]
+    check("theta=0 is not a comb", ratio[0] > 0.5, f"odd/even={ratio[0]:.4f}")
+    check("theta=45deg is not a comb", ratio[1] > 0.5, f"odd/even={ratio[1]:.4f}")
+    check("theta=90deg is not a comb", ratio[2] > 0.5, f"odd/even={ratio[2]:.4f}")
 
     # ---- 5. fbp is consistent at both samplings ----------------------------
     print("5. fbp round trip")
@@ -159,9 +166,11 @@ def main():
             cp.linalg.norm(cl.R(cl.fbp(d, 'ramp')) - d) / cp.linalg.norm(d))
     check(f"nd={nc} (nd == n) unchanged", abs(rels[nc] - 0.341) < 0.05,
           f"||R fbp(d) - d||/||d|| = {rels[nc]:.4f}")
-    # Informational: with the outer bins zeroed there is nothing for the ramp
-    # filter to amplify out at |f| = nd/(2n), so nd = 2n lands on the nd == n
-    # value.  The BH solver never calls fbp; step 5's initial guess does.
+    # Informational: the ramp filter runs out to |f| = nd/(2n), so nd = 2n
+    # weights the outer band the nd = n case never sees.  With the skip guard
+    # in place that band is signal rather than aliased replicas, and the two
+    # round trips now agree to about 1%.  The BH solver never calls fbp;
+    # step 5's initial guess does.
     print(f"     (informational) nd=2n: ||R fbp(d) - d||/||d|| = {rels[n]:.3f}, "
           f"against {rels[nc]:.3f} at nd=n")
 
