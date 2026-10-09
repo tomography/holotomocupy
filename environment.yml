@@ -1,0 +1,27 @@
+# Creates the environment the package is developed and tested in:
+#
+#     conda env create -f environment.yml
+#     conda activate holotomocupy
+#     pip install -e .
+#
+# h5py must come from the `*=mpi_openmpi_*` build -- the plain conda-forge h5py
+# is serial and `Writer` opens its checkpoints with `driver='mpio'`.
+# cupy-cuda12x is for CUDA 12; use cupy-cuda13x on a CUDA 13 driver.
+name: holotomocupy
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - openmpi
+  - mpi4py
+  - h5py=*=mpi_openmpi_*
+  - numpy
+  - scipy
+  - matplotlib
+  - tifffile
+  - jupyterlab
+  - pip
+  - pip:
+      - cupy-cuda12x
+      - nvtx
+      - dxchange

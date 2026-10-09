@@ -1,0 +1,107 @@
+#!/bin/bash
+#PBS -A 17445
+#PBS -l select=2:system=polaris
+#PBS -l place=scatter
+#PBS -l filesystems=home:eagle
+#PBS -l walltime=0:59:00
+#PBS -q debug
+#PBS -N holotomo
+#PBS -j oe
+
+# Software environment (modules + conda env). See the Polaris setup notes.
+HTC_ENV=${HTC_ENV:-"${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/../polaris_env.sh"}
+# --------------------------
+
+NNODES=$(wc -l < $PBS_NODEFILE)
+NRANKS=4
+NTHREADS=4
+NDEPTH=8
+export NTOTRANKS=$(( NNODES * NRANKS ))
+
+# Directory the job was submitted from (PBS_O_WORKDIR when submitted via qsub;
+# falls back to the script's own directory for local ./polaris_run.sh testing).
+# Plain $(pwd) does NOT work: PBS starts the job in $HOME, not where you qsub'd.
+SCRIPT_DIR="${PBS_O_WORKDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+rec_dir="$(dirname "${SCRIPT_DIR}")"
+
+cd "${rec_dir}"
+exec > >(tee "${SCRIPT_DIR}/slurm-${PBS_JOBID}.out") 2>&1
+
+echo "Sample dir:  ${SCRIPT_DIR}"
+echo "Rec dir:     ${rec_dir}"
+echo "Jobid: $PBS_JOBID"
+echo "Running on host: $(hostname)"
+echo "Running on nodes: $(cat $PBS_NODEFILE)"
+echo "NUM_OF_NODES=${NNODES}  TOTAL_NUM_RANKS=${NTOTRANKS}  RANKS_PER_NODE=${NRANKS}"
+
+# Modules + conda env. env.sh loads PrgEnv-gnu, cray-mpich, cudatoolkit,
+# cray-hdf5-parallel and activates the holotomocupy env; it must be sourced
+# inside the job, not just at install time, or the cray-mpich-linked mpi4py
+# and h5py will not find their libraries.
+[ -r "${HTC_ENV}" ] || { echo "ERROR: HTC_ENV not readable: ${HTC_ENV}"; exit 1; }
+source "${HTC_ENV}"
+echo "python: $(which python)"
+
+# PBS can pin a host but cannot negate one, so a node that comes up with
+# cudaErrorDevicesUnavailable can only be filtered from inside the job.
+# Must run AFTER the env is sourced: the probe needs cupy.
+HOSTOPT=""
+if [ "${HEALTHCHECK:-1}" = "1" ]; then
+    GOOD="${SCRIPT_DIR}/nodes.good.${PBS_JOBID}"
+    bash "${rec_dir}/gpu_healthcheck.sh" "${GOOD}" "${NRANKS}" "${RUN_NODES:-1}" || { echo "ERROR: too few healthy nodes in this allocation; aborting."; exit 1; }
+    head -n "${RUN_NODES:-$(wc -l < "${GOOD}")}" "${GOOD}" > "${GOOD}.run"
+    NNODES=$(wc -l < "${GOOD}.run")
+    export NTOTRANKS=$(( NNODES * NRANKS ))
+    HOSTOPT="--hostfile ${GOOD}.run"
+    echo "Running on ${NNODES} healthy nodes  TOTAL_NUM_RANKS=${NTOTRANKS}"
+fi
+
+# NFP probe retrieval -- OPT-IN.  Uncomment prb_file in config_step6.conf after.
+# echo "=== nfp START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step0.py" "${SCRIPT_DIR}/config_step0.conf" || exit $?
+
+# THE RUN IS IN TWO PASSES, WITH step7 BETWEEN THEM.
+#
+#   PASS 1   steps15, then bin2 -> bin1.  No drift correction yet.
+#   step7    by hand, ONE GPU, no MPI:   python step7.py config_step6_bin1.conf
+#            writes correct_correct3D_extra.txt next to the configs.
+#   PASS 2   bin2 -> bin1 -> bin0, started FRESH so bin2 reads the correction.
+#
+# Only bin2 applies the file: it is the one level with start_iter=0, and
+# read_pos adds it to /exchange/cshifts_final there.  bin1 and bin0 resume
+# from checkpoints and inherit the corrected positions -- re-applying it would
+# double count.  find_latest_checkpoint returns None whenever start_iter=0, so
+# pass 2 does NOT need path_out emptied first; bin2 simply overwrites.
+#
+# Uncomment ONE pass per submission.
+
+# ---- PASS 1 ---------------------------------------------------------------
+# raw HDF5 -> HDF5, preprocess, shifts, binned data, Paganin+FBP.
+# start_step=5 in config_steps15.conf is enough if the 568 GB h5 is already
+# there and only nobj changed; start_step=1 reconverts everything.
+# echo "=== steps15 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/steps15.py" "${SCRIPT_DIR}/config_steps15.conf" || exit $?
+
+# # bin 2: 4x4  n=512   nobj=640   iters    0 -> 1024
+# echo "=== pass1 bin2 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+
+# # bin 1: 2x2  n=1024  nobj=1280  iters 1024 -> 1280
+# echo "=== pass1 bin1 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+
+# ---- step7, by hand, between the passes -----------------------------------
+#   cd <this dir> && python step7.py config_step6_bin1.conf
+# Reads checkpoint_1280.h5 from path_out, writes correct_correct3D_extra.txt
+# here.  Copy checkpoint_1280.h5 aside first if you want to compare against
+# the uncorrected result -- pass 2 overwrites it.
+
+# ---- PASS 2  (uncomment after step7) --------------------------------------
+# echo "=== pass2 bin2 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin2.conf" || exit $?
+#
+# echo "=== pass2 bin1 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin1.conf" || exit $?
+#
+# echo "=== pass2 bin0 START $(date) ==="
+# mpiexec ${HOSTOPT} -n ${NTOTRANKS} --ppn ${NRANKS} --depth=${NDEPTH} --cpu-bind depth --env OMP_NUM_THREADS=${NTHREADS} "${SCRIPT_DIR}/set_affinity_gpu_polaris.sh" python "${SCRIPT_DIR}/step6.py" "${SCRIPT_DIR}/config_step6_bin0.conf" || exit $?

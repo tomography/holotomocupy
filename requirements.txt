@@ -1,0 +1,12 @@
+# pip-only install (conda is preferred -- see environment.yml -- because h5py
+# needs an MPI-enabled build that pip cannot provide on its own).
+# Swap cupy-cuda12x for cupy-cuda13x on a CUDA 13 driver.
+cupy-cuda12x
+mpi4py
+h5py
+numpy
+scipy
+matplotlib
+tifffile
+nvtx
+dxchange

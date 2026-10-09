@@ -1,6 +1,10 @@
-sphinx >=5, <6
-sphinx_rtd_theme >=1, <2
-sphinxcontrib-bibtex >=2, <3
-nbsphinx
-pandoc
-jupyter
+# Docs-only dependencies.  Everything that needs a GPU, MPI or a beamline file
+# format is mocked in conf.py (autodoc_mock_imports), so this list is small on
+# purpose -- a Read the Docs builder has no CUDA.
+sphinx>=7
+myst-parser>=2
+furo
+sphinx-copybutton
+numpy
+scipy
+sphinxcontrib-bibtex>=2
