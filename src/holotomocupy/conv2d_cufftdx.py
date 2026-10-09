@@ -22,12 +22,15 @@ Environment variables (all optional):
 """
 
 import ctypes
+import functools
 import os
 import pathlib
 import subprocess
-import sys
+import warnings
 
 import cupy as cp
+
+from .logger_config import logger
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -42,8 +45,20 @@ _MATHDX      = pathlib.Path(os.environ.get(
 _CUTLASS     = _MATHDX / "external/cutlass/include"
 _CUFFTDX_EX  = _MATHDX / "example/cufftdx"   # common/ and 07_convolution_3d/ live here
 _NVCC    = os.environ.get("NVCC", "nvcc")
-_SM      = os.environ.get("CUFFTDX_SM", "80")
 _SO_DIR  = pathlib.Path(os.environ.get("CUFFTDX_SO_DIR", str(_HERE)))
+
+
+@functools.lru_cache(maxsize=None)
+def _sm() -> str:
+    """SM version to compile for. Queried lazily so that importing this module
+    never creates a CUDA context (which would land on the wrong device when
+    ranks bind their GPU after import)."""
+    return os.environ.get("CUFFTDX_SM") or cp.cuda.Device().compute_capability
+
+
+@functools.lru_cache(maxsize=None)
+def _max_smem() -> int:
+    return cp.cuda.Device().attributes['MaxSharedMemoryPerBlockOptin']
 
 # ---------------------------------------------------------------------------
 # EPT / FPB tuning table
@@ -55,13 +70,15 @@ _EPT_FPB: dict = {
     4096: (32, 4),
 }
 _WARP     = 32
-_MAX_SMEM = 163840  # sm_80 max optin shared memory per block
 
 
 def _ept_fpb(n: int):
+    # Validate table entry against the current GPU's shared-memory limit before using it.
     if n in _EPT_FPB:
-        return _EPT_FPB[n]
-    fpb = next(f for f in (8, 4, 2, 1) if n * f * 8 <= _MAX_SMEM)
+        ept, fpb = _EPT_FPB[n]
+        if n * fpb * 8 <= _max_smem():
+            return ept, fpb
+    fpb = next(f for f in (8, 4, 2, 1) if n * f * 8 <= _max_smem())
     for max_block in (512, 1024):
         for ept in (1, 2, 4, 8, 16, 32, 64, 128):
             if n % ept != 0:
@@ -81,12 +98,13 @@ _lib_cache: dict = {}
 
 
 def _compile(nx, ny, ept_x, fpb_x, ept_y, fpb_y) -> ctypes.CDLL:
-    so = _SO_DIR / f"libconv2d_{nx}x{ny}_xe{ept_x}f{fpb_x}_ye{ept_y}f{fpb_y}.so"
+    sm = _sm()
+    so = _SO_DIR / f"libconv2d_sm{sm}_{nx}x{ny}_xe{ept_x}f{fpb_x}_ye{ept_y}f{fpb_y}.so"
     if not so.exists() or so.stat().st_mtime < _SRC.stat().st_mtime:
-        print(f"  JIT-compiling {nx}x{ny} EPT_X={ept_x} FPB_X={fpb_x} "
-              f"EPT_Y={ept_y} FPB_Y={fpb_y} …", flush=True)
+        logger.info(f"cuFFTDx JIT-compiling {nx}x{ny} EPT_X={ept_x} FPB_X={fpb_x} "
+                    f"EPT_Y={ept_y} FPB_Y={fpb_y} ...")
         r = subprocess.run([
-            _NVCC, "-O3", "--std=c++17", f"-arch=sm_{_SM}",
+            _NVCC, "-O3", "--std=c++17", f"-arch=sm_{sm}",
             "-Xcompiler", "-fPIC", "-shared",
             f"-I{_MATHDX}/include", f"-I{_CUTLASS}",
             f"-I{_CUFFTDX_EX}", f"-I{_CUFFTDX_EX}/07_convolution_3d",
@@ -98,7 +116,7 @@ def _compile(nx, ny, ept_x, fpb_x, ept_y, fpb_y) -> ctypes.CDLL:
         ], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"cuFFTDx build failed for {nx}x{ny}:\n{r.stderr}")
-        print("  Done.", flush=True)
+        logger.info("cuFFTDx build done.")
     lib = ctypes.CDLL(str(so))
     lib.conv2d_create.restype   = ctypes.c_void_p
     lib.conv2d_create.argtypes  = [ctypes.c_void_p]
@@ -132,7 +150,7 @@ def _get_lib(nx: int, ny: int) -> ctypes.CDLL:
     # Validate shared memory
     xs, ys = ctypes.c_int(), ctypes.c_int()
     lib.conv2d_smem_size(ctypes.byref(xs), ctypes.byref(ys))
-    while max(xs.value, ys.value) > _MAX_SMEM:
+    while max(xs.value, ys.value) > _max_smem():
         fpb = max(fpb_x, fpb_y)
         if fpb <= 1:
             raise RuntimeError(f"No valid FPB for {nx}x{ny}: smem too large")
@@ -198,17 +216,19 @@ class Conv2DCUFFTDX:
 # ---------------------------------------------------------------------------
 # Availability flag  (checked at import time by propagation.py)
 # ---------------------------------------------------------------------------
-import warnings as _warnings
-
-def _check_available() -> bool:
+@functools.lru_cache(maxsize=None)
+def cufftdx_available() -> bool:
+    """True if the cuFFTDx path can be used. Evaluated (and cached) on first
+    call rather than at import time, so importing the package costs no nvcc
+    subprocess and emits no output."""
     if not _SRC.exists():
-        _warnings.warn(
+        warnings.warn(
             f"cuFFTDx source not found at {_SRC}. Falling back to cuPy FFT.",
             stacklevel=2,
         )
         return False
     if not (_MATHDX / "include").exists() or not _CUFFTDX_EX.exists():
-        _warnings.warn(
+        warnings.warn(
             f"mathDX not found at {_MATHDX} (include/ or example/cufftdx/ missing). "
             f"Set MATHDX_ROOT to your mathDX installation. Falling back to cuPy FFT.",
             stacklevel=2,
@@ -217,13 +237,13 @@ def _check_available() -> bool:
     try:
         r = subprocess.run([_NVCC, "--version"], capture_output=True)
         if r.returncode != 0:
-            _warnings.warn(
-                f"nvcc returned non-zero exit code. Falling back to cuPy FFT.",
+            warnings.warn(
+                "nvcc returned non-zero exit code. Falling back to cuPy FFT.",
                 stacklevel=2,
             )
             return False
     except FileNotFoundError:
-        _warnings.warn(
+        warnings.warn(
             f"nvcc not found (NVCC={_NVCC!r}). Set NVCC env var or add nvcc to PATH. "
             f"Falling back to cuPy FFT.",
             stacklevel=2,
@@ -231,9 +251,6 @@ def _check_available() -> bool:
         return False
     return True
 
-CUFFTDX_AVAILABLE: bool = _check_available()
-if CUFFTDX_AVAILABLE:
-    print("cuFFTDx (mathDX) available — using fast cuFFTDx propagator.", flush=True)
 
 
 def precompile(nx: int, ny: int) -> None:
@@ -245,5 +262,5 @@ def precompile(nx: int, ny: int) -> None:
 
     No-op if cuFFTDx is unavailable.
     """
-    if CUFFTDX_AVAILABLE:
+    if cufftdx_available():
         _get_lib(nx, ny)

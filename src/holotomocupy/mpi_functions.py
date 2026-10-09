@@ -175,3 +175,13 @@ class MPIClass:
         buf = np.array([a, b], dtype='float64')
         self.comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.SUM)
         return float(buf[0]), float(buf[1])
+
+    @timer
+    def allreduce_scalars(self, *vals):
+        """Sum-reduce any number of scalars across ranks in a single MPI call.
+
+        float64 throughout: the caller combines these into a Schur complement
+        (see Rec._compute_step_fused), which cancels significant digits."""
+        buf = np.array(vals, dtype='float64')
+        self.comm.Allreduce(MPI.IN_PLACE, buf, op=MPI.SUM)
+        return tuple(float(v) for v in buf)

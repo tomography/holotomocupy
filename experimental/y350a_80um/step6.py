@@ -34,25 +34,28 @@ args.comm = comm
 set_log_level(args.log_level)
 
 # --- Distribute object and projection slices across MPI ranks -----------
-cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, args.obj_dtype)
+cl_mpi = MPIClass(comm, args.nzobj, args.ntheta, args.nobj, 'complex64')
 
 # --- Build I/O helpers --------------------------------------------------
 reader = Reader(
     args.in_file, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.ndist, args.nz, args.n,
     args.paganin, args.rotation_center_shift, args.start_theta, args.bin,
+    correct3d_extra=args.correct3d_extra,
+    correct3d_extra_file=args.correct3d_extra_file,
+    correct3d_bin=args.correct3d_bin,
 )
 writer = Writer(
     args.path_out, comm,
     cl_mpi.st_obj, cl_mpi.end_obj, args.nzobj, args.nobj,
     cl_mpi.st_theta, cl_mpi.end_theta, args.ntheta,
-    args.ndist, args.nz, args.n, args.obj_dtype,
+    args.ndist, args.nz, args.n,
 )
 
 # Physics parameters are stored in the HDF5 file and forwarded to the solver
-args.energy                  = args.energy#reader.energy
+args.energy                  = args.energy if args.energy is not None else reader.energy
 args.focustodetectordistance = reader.focustodetectordistance
 args.z1                      = reader.z1
 args.detector_pixelsize      = reader.detector_pixelsize
@@ -75,7 +78,7 @@ if comm.Get_rank() == 0:
     logger.info(f"  rotation center shift: {args.rotation_center_shift:.4f} px")
     logger.info(f"  paganin              : {args.paganin}")
     logger.info(f"  n MPI ranks          : {comm.Get_size()}")
-    logger.info(f"  in_file              : {args.in_file}")
+    logger.info(f"  pfile                : {args.pfile or args.in_file}")
     logger.info(f"  path_out             : {args.path_out}")
     logger.info("=" * 60)
 
@@ -91,7 +94,10 @@ logger.info("Read data")
 reader.read_data(out=cl.data)
 reader.read_ref(out=cl.ref)
 reader.read_shrink(out=cl.shrink_nd)
-logger.info(cl.shrink_nd[:3,:])
+logger.debug(f"shrink[:3] (dist, theta, [y x]) = {cl.shrink_nd[:3]}")
+# Fit shrink(t) = A*t + B per (distance, axis) -- this is the starting
+# point of the shrinkage variable, refined further when rho[3] > 0.
+cl.init_tp_from_shrink()
 
 # --- Load initial variables (object, probe, positions) ------------------
 # Resume from the latest checkpoint if one exists; otherwise use the
@@ -100,7 +106,8 @@ logger.info("Read initial variables")
 ckpt = find_latest_checkpoint(args.path_out, args.start_iter)
 if ckpt:
     logger.info(f"Resuming from checkpoint: {ckpt}")
-    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'])
+    reader.read_checkpoint(ckpt, out_obj=cl.vars['obj'], out_pos=cl.vars['pos'], out_prb=cl.vars['prb'],
+                           out_bd=cl.vars.get('bd'), out_tp=cl.vars['tp'])
 elif getattr(args, 'init_vol', None):
     logger.info(f"Reading initial object from vol file: {args.init_vol}")
     reader.read_vol_obj(args.init_vol, out=cl.vars["obj"], scale=getattr(args, "init_vol_scale", 1.0))
@@ -116,7 +123,8 @@ else:
     reader.read_prb(prb_file=args.prb_file, out=cl.vars['prb'])
 if args.pos_checkpoint:
     logger.info(f"Overriding positions from: {args.pos_checkpoint}")
-    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'])
+    reader.read_pos_checkpoint(args.pos_checkpoint, out=cl.vars['pos'],
+                               out_tp=cl.vars['tp'])
 
 # --- Run iterative reconstruction ---------------------------------------
 logger.info("Run reconstruction")

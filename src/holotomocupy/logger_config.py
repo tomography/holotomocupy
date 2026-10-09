@@ -15,11 +15,27 @@ COLORS = {
 }
 
 class MPIRankFilter(logging.Filter):
+    """Tag records with the rank and drop rank>0 DEBUG records."""
     def filter(self, record):
         record.rank = rank
         if record.levelno == logging.DEBUG and rank != 0:
             return False
         return True
+
+
+def add_file_handler(path: str):
+    """Tee logger output to a plain-text file (no ANSI colours). Idempotent per path."""
+    for h in logger.handlers:
+        if isinstance(h, logging.FileHandler) and getattr(h, 'baseFilename', None) == path:
+            return h
+    fh = logging.FileHandler(path, mode='w')
+    fh.addFilter(MPIRankFilter())
+    fh.setFormatter(logging.Formatter(
+        fmt="%(asctime)s [rank=%(rank)d] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    logger.addHandler(fh)
+    return fh
 
 class ColorMessageFormatter(logging.Formatter):
     def format(self, record):

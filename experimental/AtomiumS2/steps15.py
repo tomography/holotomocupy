@@ -36,6 +36,7 @@ args = parse_args_steps15(sys.argv[1])
 start_step            = args.start_step
 rotation_center_shift = args.rotation_center_shift
 nlevels               = args.nlevels
+start_level_rec       = args.start_level_rec
 paganin               = args.paganin
 nchunk                = args.nchunk
 ref_dist              = args.ref_dist
@@ -135,9 +136,9 @@ distances           = (z1 * z2) / focustodetectordistance * norm_magnifications*
 voxelsizes          = np.abs(detector_pixelsize / magnifications)
 voxelsize           = voxelsizes[0]
 
-shrink_nd          = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist]
+shrink_nd          = load_shrink_from_mats(path, pfile, ndist, ntheta)  # [ntheta, ndist, 2] (y, x)
 shrink             = shrink_nd[0]
-eff_magnifications = norm_magnifications / (1 + shrink)
+eff_magnifications = norm_magnifications[:, None] / (1 + shrink)   # [ndist, 2] (y, x)
 
 # n from actual EDF file size (images are n×n), overrideable via --n
 n0, n1 = fabio.open(f'{dname0}/ref0000_0000.edf').data.shape
@@ -284,70 +285,76 @@ else:
         mask  = cp.abs(data - fdata) > fdata * threshold
         return cp.where(mask, fdata, data)
 
-    # --- Rank 0 reads flat/dark fields, computes ref -----------------------
+    # --- Rank 0 reads flat/dark fields, computes ref_start and ref_end ------
     if rank == 0:
-        ref0 = np.empty([nref,  ndist, n, n], dtype='float32')
-        dark_arr = np.empty([ndark, ndist, n, n], dtype='float32')
+        ref0_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
+        ref1_arr  = np.empty([nref,  ndist, n, n], dtype='float32')
+        dark_arr  = np.empty([ndark, ndist, n, n], dtype='float32')
         with h5py.File(fpath) as fid:
             for k in range(ndist):
-                ref0[:, k]     = fid[f'/exchange/data_white_start{k}'][:, :n, :n]
-                dark_arr[:, k] = fid[f'/exchange/data_dark{k}'][:, :n, :n]
+                ref0_arr[:, k]  = fid[f'/exchange/data_white_start{k}'][:, :n, :n]
+                ref1_arr[:, k]  = fid[f'/exchange/data_white_end{k}'][:, :n, :n]
+                dark_arr[:, k]  = fid[f'/exchange/data_dark{k}'][:, :n, :n]
 
         dark = np.mean(dark_arr, axis=0).astype('float32')   # [ndist, n, n]
-        ref  = np.mean(ref0,     axis=0).astype('float32')   # [ndist, n, n]
+        dark_gpu = cp.array(dark)
 
-        ref_gpu  = cp.array(ref) - cp.array(dark)
-        ref_gpu[ref_gpu < 0] = 1e-3
-        # ref_gpu[:, 1402:1430, 844:872] = ref_gpu.mean(axis=(1, 2), keepdims=True)
-        ref_gpu[:] = remove_outliers(ref_gpu, radius, threshold)
-        ref = ref_gpu.get()
+        def _process_ref(ref_raw):
+            r = cp.array(np.mean(ref_raw, axis=0).astype('float32')) - dark_gpu
+            r[r < 0] = 1e-3
+            r[:] = remove_outliers(r, radius, threshold)
+            return r
+
+        ref_start_gpu = _process_ref(ref0_arr)
+        ref_end_gpu   = _process_ref(ref1_arr)
+
+        # Cross-distance normalisation: scale all distances to distance 0 mean
+        mmr = ref_start_gpu.mean(axis=(1, 2))   # [ndist]
+        ref_start_gpu /= mmr[:, None, None] / mmr[0]
+        ref_end_gpu   /= mmr[:, None, None] / mmr[0]
+        # Normalise so ref_start mean == 1
+        ref_start_gpu /= mmr[0]
+        ref_end_gpu   /= mmr[0]
+
+        ref_start = ref_start_gpu.get()
+        ref_end   = ref_end_gpu.get()
     else:
-        ref  = np.empty([ndist, n, n], dtype='float32')
-        dark = np.empty([ndist, n, n], dtype='float32')
+        ref_start = np.empty([ndist, n, n], dtype='float32')
+        ref_end   = np.empty([ndist, n, n], dtype='float32')
+        dark      = np.empty([ndist, n, n], dtype='float32')
 
-    comm.Bcast(ref,  root=0)
-    comm.Bcast(dark, root=0)
+    comm.Bcast(ref_start, root=0)
+    comm.Bcast(ref_end,   root=0)
+    comm.Bcast(dark,      root=0)
 
-    dark_gpu = cp.array(dark)
+    dark_gpu      = cp.array(dark)
+    ref_start_gpu = cp.array(ref_start)
+    ref_end_gpu   = cp.array(ref_end)
+    mmr_start = ref_start_gpu.mean(axis=(1, 2)).get()  # [ndist]
+    mmr_end   = ref_end_gpu.mean(axis=(1, 2)).get()    # [ndist]
 
-    # --- Compute mean_data_ref on rank 0, broadcast ------------------------
-    if rank == 0:
-        mean_data_ref = np.zeros(ndist, dtype='float32')
-        with h5py.File(fpath) as fid:
-            for k in range(ndist):
-                data = cp.array(fid[f'/exchange/data{k}'][0, :n, :n].astype('float32'))
-                data -= dark_gpu[k]
-                data[data < 0] = 0
-                data = remove_outliers(data[None], radius, threshold)[0]
-                mean_data_ref[k] = float(data.mean())
-
-        mmr = np.mean(ref, axis=(1, 2))
-        mean_data_ref *= mmr[0] / mmr[:]
-        ref           *= mmr[0] / mmr[:, None, None]
-        mean_data_ref /= mmr[0]
-        ref           /= mmr[0]
-    else:
-        mean_data_ref = np.zeros(ndist, dtype='float32')
-
-    comm.Bcast(mean_data_ref, root=0)
-    comm.Bcast(ref,           root=0)   # ref was rescaled above
-
-    # --- Rank 0: write pref, delete any existing pdata ---------------------
+    # --- Rank 0: write pref / pref_end, delete any existing pdata ----------
     if rank == 0:
         with h5py.File(fpath, 'a') as fid:
-            if '/exchange/pref' in fid:
-                del fid['/exchange/pref']
-            fid.create_dataset('/exchange/pref', data=ref)
+            for key, arr in (('/exchange/pref', ref_start), ('/exchange/pref_end', ref_end)):
+                if key in fid:
+                    del fid[key]
+                fid.create_dataset(key, data=arr)
             for k in range(ndist):
                 if f'/exchange/pdata{k}' in fid:
                     del fid[f'/exchange/pdata{k}']
     comm.Barrier()
 
     # --- All ranks write pdata in parallel ---------------------------------
-    ref_gpu = cp.array(ref)
+    t_scale = max(ntheta - 1, 1)
+    # Create output datasets first so all metadata is committed before data I/O
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
-        pdata_ds = [fid.create_dataset(f'/exchange/pdata{k}', shape=(ntheta, n, n), dtype='float32')
-                    for k in range(ndist)]
+        for k in range(ndist):
+            fid.create_dataset(f'/exchange/pdata{k}', shape=(ntheta, n, n), dtype='float32')
+    comm.Barrier()
+
+    with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
+        pdata_ds = [fid[f'/exchange/pdata{k}'] for k in range(ndist)]
 
         for k in range(ndist):
             for j in range(local_start, local_end, chunk_size):
@@ -358,9 +365,12 @@ else:
                 data[data < 0] = 0
                 # data[:, 1402:1430, 844:872] = data.mean(axis=(1, 2), keepdims=True)
                 data[:] = remove_outliers(data, radius, threshold)
+
+                t = cp.arange(j, end, dtype='float32') / t_scale
+                target = ((1 - t) * float(mmr_start[k]) + t * float(mmr_end[k]))[:, None, None]
                 _mean = data.mean(axis=(1, 2), keepdims=True)
-                _mean[_mean == 0] = 1  # dark/blocked projections: keep as-is, avoid NaN
-                data *= mean_data_ref[k] / _mean
+                _mean[_mean == 0] = 1
+                data *= target / _mean
                 data[~cp.isfinite(data)] = 1
 
                 pdata_ds[k][j:end] = data.get()
@@ -406,21 +416,30 @@ if rank == 0:
 
         # --- RHAPP inter-plane shifts (from Peter's MATLAB pipeline) ---
         _rhapp_path = f'{path}/{pfile}_/rhapp.mat'
-        logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
-
-        rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
-        rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
-        # NOTE: rhapp was found on shrink-corrected images in Peter's pipeline, so strictly
-        # it should be rescaled by (1+shrink) per plane; skipped here as Peter does not do it.
-        rhapp_shifts = (-rhapp_reordered).astype('float32')
+        if not os.path.exists(_rhapp_path):
+            logger.warning(f'Step 3: rhapp.mat not found, using zeros: {_rhapp_path}')
+            rhapp_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+        else:
+            logger.info(f'Step 3: reading rhapp       from {_rhapp_path}')
+            rhapp_raw = load_octave_text_mat(_rhapp_path, 'rhapp')
+            rhapp_reordered = rhapp_raw.swapaxes(0, 2)[:ntheta]
+            rhapp_reordered -= rhapp_reordered[:,ref_dist:ref_dist+1]
+            avg_plane_zero = rhapp_reordered[:, 0].mean(axis=0)
+            rhapp_reordered -= avg_plane_zero[np.newaxis, np.newaxis, :]
+            logger.info(f'Step 3: avg_plane_zero  y={avg_plane_zero[0]:.4f} px   x={avg_plane_zero[1]:.4f} px')
+            rhapp_shifts = (-rhapp_reordered).astype('float32')
 
         # --- Motion shifts (slow drift of reference plane) ---
         _motion_dname = f'{path}/{pfile}_{ref_dist+1}_'
         _motion_path = f'{_motion_dname}/correct_motion.txt'
-        logger.info(f'Step 3: reading motion      from {_motion_path}')
-        raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
-        motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
-        motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
+        if not os.path.exists(_motion_path):
+            logger.warning(f'Step 3: correct_motion.txt not found, using zeros: {_motion_path}')
+            motion_shifts = np.zeros([ntheta, ndist, 2], dtype='float32')
+        else:
+            logger.info(f'Step 3: reading motion      from {_motion_path}')
+            raw_motion = np.loadtxt(_motion_path)[:ntheta, ::-1].astype('float32')
+            motion_base   = raw_motion / eff_magnifications[ref_dist] - random_shifts[:, ref_dist]
+            motion_shifts = np.tile(motion_base[:, np.newaxis], (1, ndist, 1))
 
         # --- 3-D tomographic correction shifts ---
         _c3d_path = f'{path}/{pfile}_/correct_correct3D.txt'
@@ -463,26 +482,33 @@ else:
     # --- Rank 0 reads ref and full shift array; broadcast to all ranks ----
     if rank == 0:
         with h5py.File(fpath) as fid:
-            ref = fid['/exchange/pref'][:, :n, :n].astype('float32')   # [ndist, n, n]
-            r   = fid['/exchange/cshifts_final'][:].astype('float32')
+            ref     = fid['/exchange/pref'][:, :n, :n].astype('float32')     # [ndist, n, n]
+            ref_end = fid['/exchange/pref_end'][:, :n, :n].astype('float32') if '/exchange/pref_end' in fid else ref.copy()
+            r       = fid['/exchange/cshifts_final'][:].astype('float32')
         r[..., 1] += rotation_center_shift
     else:
-        ref = np.empty([ndist, n, n], dtype='float32')
-        r   = np.empty([ntheta, ndist, 2], dtype='float32')
+        ref     = np.empty([ndist, n, n], dtype='float32')
+        ref_end = np.empty([ndist, n, n], dtype='float32')
+        r       = np.empty([ntheta, ndist, 2], dtype='float32')
 
-    comm.Bcast(ref, root=0)
-    comm.Bcast(r,   root=0)
+    comm.Bcast(ref,     root=0)
+    comm.Bcast(ref_end, root=0)
+    comm.Bcast(r,       root=0)
 
     # --- Rank 0 writes binned refs ----------------------------------------
     if rank == 0:
-        ref0 = ref.copy()
+        ref0     = ref.copy()
+        ref0_end = ref_end.copy()
         with h5py.File(fpath, 'a') as fid:
             for bin in range(nlevels):
-                if f'/exchange/pref_{bin}' in fid:
-                    del fid[f'/exchange/pref_{bin}']
-                fid.create_dataset(f'/exchange/pref_{bin}', data=ref0)
-                ref0 = 0.5 * (ref0[..., ::2] + ref0[..., 1::2])
-                ref0 = 0.5 * (ref0[..., ::2, :] + ref0[..., 1::2, :])
+                for key, arr in ((f'/exchange/pref_{bin}', ref0), (f'/exchange/pref_end_{bin}', ref0_end)):
+                    if key in fid:
+                        del fid[key]
+                    fid.create_dataset(key, data=arr)
+                ref0     = 0.5 * (ref0[..., ::2]     + ref0[..., 1::2])
+                ref0     = 0.5 * (ref0[..., ::2, :]  + ref0[..., 1::2, :])
+                ref0_end = 0.5 * (ref0_end[..., ::2]    + ref0_end[..., 1::2])
+                ref0_end = 0.5 * (ref0_end[..., ::2, :] + ref0_end[..., 1::2, :])
 
             # Delete existing pdata{k}_{bin} datasets
             for bin in range(nlevels):
@@ -492,8 +518,10 @@ else:
     comm.Barrier()
 
     # --- All ranks create output datasets collectively + process -----------
-    cl_shift = Shift(n, nobj, n, nobj, 'complex64')
+    cl_shift = Shift(n, nobj, n, nobj)
     cref     = cp.array(ref)
+    cref_end = cp.array(ref_end)
+    t_scale  = max(ntheta - 1, 1)
 
     with h5py.File(fpath, 'a', driver='mpio', comm=comm) as fid:
         data_out = [[fid.create_dataset(f'/exchange/pdata{k}_{bin}',
@@ -512,24 +540,25 @@ else:
             for k in range(ndist):
                 data[k] = cp.array(fid[f'/exchange/pdata{k}'][j, :n, :n].astype('float32'))
 
-            rdata = data / (cref + 1e-5)
+            t = float(j) / t_scale
+            cref_chunk = (1 - t) * cref + t * cref_end
+            rdata = data / (cref_chunk + 1e-5)
 
             for k in range(ndist - 1, -1, -1):
-                shrink_jk  = float(shrink_nd[j, k])
-                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
-                mag = cp.array(1.0 / eff_mag_jk)
+                shrink_jk  = shrink_nd[j, k]                      # (2,) y, x
+                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)   # (2,)
+                mag = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
                     cp.log(tmp[None]).astype('complex64'),
                     cp.array(r[j:j+1, k]), mag
                 )[0].real
-                tmp /= eff_mag_jk**2
                 tmp = cp.exp(tmp)
 
-                padx0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj - n / eff_mag_jk) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj - n / eff_mag_jk) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj - n / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj - n / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj - n / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj - n / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj, max(0, padx0)) + 5
                 pady0 = min(nobj, max(0, pady0)) + 5
                 padx1 = min(nobj, max(0, padx1)) + 5
@@ -627,19 +656,16 @@ else:
             pass
     comm.Barrier()
 
-    for bin in range(nlevels):
+    for bin in range(start_level_rec, nlevels):
         n_bin         = n // (2**bin)
         nobj_bin      = nobj // (2**bin)
         voxelsize_bin = voxelsize * (2**bin)
         if rank == 0:
             logger.info(f'Step 5: bin={bin}  n_bin={n_bin}  nobj_bin={nobj_bin}  voxelsize={voxelsize_bin*1e9:.3f} nm')
 
-        # Rotation centre shift recursively adjusted for bin level
-        s = rotation_center_shift
-        for _ in range(bin):
-            s = (s - 0.5) / 2
-        r     = (cshifts / 2**bin).astype('float32')
-        r[..., 1] += s
+        scale = 1.0 / 2**bin
+        r = (cshifts * scale).astype('float32')
+        r[..., 1] += rotation_center_shift * scale
         r_gpu = cp.array(r)
 
         # Ref for this bin level (rank 0 → Bcast)
@@ -651,7 +677,7 @@ else:
         comm.Bcast(ref, root=0)
 
         cref     = cp.array(ref)
-        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin, 'complex64')
+        cl_shift = Shift(n_bin, nobj_bin, n_bin, nobj_bin)
         npad_bin = n_bin // 16
         v_bin    = cp.linspace(0, 1, npad_bin, endpoint=False)
         v_bin    = v_bin**5 * (126 - 420*v_bin + 540*v_bin**2 - 315*v_bin**3 + 70*v_bin**4)
@@ -667,20 +693,19 @@ else:
             rdata = data_j / (cref + 1e-5)
             srdata.fill(0)
             for k in range(ndist - 1, -1, -1):
-                shrink_jk  = float(shrink_nd[j, k])
-                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)
-                mag = cp.array(1.0 / eff_mag_jk)
+                shrink_jk  = shrink_nd[j, k]                      # (2,) y, x
+                eff_mag_jk = float(norm_magnifications[k]) / (1 + shrink_jk)   # (2,)
+                mag = cp.array(1.0 / eff_mag_jk, dtype='float32')[None]
                 tmp = rdata[k].astype('complex64')
                 tmp = cl_shift.curlySback(
                     cp.log(tmp[None]).astype('complex64'), r_gpu[j:j+1, k], mag
                 )[0].real
                 
-                tmp /= eff_mag_jk**2
                 tmp = cp.exp(tmp)
-                padx0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 1])
-                pady0 = int((nobj_bin - n_bin / eff_mag_jk) / 2) - int(r[j, k, 0])
-                padx1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 1])
-                pady1 = int((nobj_bin - n_bin / eff_mag_jk) / 2) + int(r[j, k, 0])
+                padx0 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) - int(r[j, k, 1])
+                pady0 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) - int(r[j, k, 0])
+                padx1 = int((nobj_bin - n_bin / eff_mag_jk[1]) / 2) + int(r[j, k, 1])
+                pady1 = int((nobj_bin - n_bin / eff_mag_jk[0]) / 2) + int(r[j, k, 0])
                 padx0 = min(nobj_bin, max(0, padx0)) + 5
                 pady0 = min(nobj_bin, max(0, pady0)) + 5
                 padx1 = min(nobj_bin, max(0, padx1)) + 5
@@ -718,7 +743,7 @@ else:
             pad8      = nobj_bin // 8
             pj0       = cp.pad(pj0, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
             
-            ph0       = multiPaganin(pj0, distances * (1 + shrink_nd[0, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
+            ph0       = multiPaganin(pj0, distances * (1 + shrink_nd[0].mean(axis=-1))**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
             ph0_crop  = ph0[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin]
             calib[1]  = float(cp.median(ph0_crop[:16 * n_bin // 512, :16 * n_bin // 512]))
         comm.Bcast(calib, root=0)
@@ -740,7 +765,7 @@ else:
                         srdata_ds[:] = srdata.get()
                     pj  = cp.array(srdata)
                     pj  = cp.pad(pj, ((0, 0), (pad8, pad8), (pad8, pad8)), 'reflect')
-                    phase = multiPaganin(pj, distances * (1 + shrink_nd[j, :])**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
+                    phase = multiPaganin(pj, distances * (1 + shrink_nd[j].mean(axis=-1))**2 / norm_magnifications**2, wavelength, voxelsize_bin, paganin, 0.01)
                     local_recPag[i] = phase[pad8:pad8+nobj_bin, pad8:pad8+nobj_bin].get()
 
                     if i % 100 == 0:

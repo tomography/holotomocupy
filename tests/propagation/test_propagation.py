@@ -24,9 +24,14 @@ ndist = len(distances)
 
 cl      = Propagation(n, nz, ntheta, ndist, wavelength, voxelsize, distances)
 
-# cuPy-only reference (no cuFFTDx) for correctness and timing comparison
+# cuPy-only reference (no cuFFTDx) for correctness and timing comparison.
+# _plan_2d is only created when _use_cufftdx is False at construction,
+# so build it explicitly after flipping the flag.
+import cupyx.scipy.fft as cufft
 cl_cupy = Propagation(n, nz, ntheta, ndist, wavelength, voxelsize, distances)
 cl_cupy._use_cufftdx = False
+if not hasattr(cl_cupy, '_plan_2d'):
+    cl_cupy._plan_2d = cufft.get_fft_plan(cl_cupy._buf_big, axes=(-2, -1), value_type='C2C')
 
 print(f'n={n}, nz={nz}, ntheta={ntheta}, ndist={ndist}')
 print(f'distances: {distances}')
@@ -150,6 +155,10 @@ j      = 0
 psi    = (cp.random.randn(ntheta, nz, n) + 1j * cp.random.randn(ntheta, nz, n)).astype('complex64')
 phi    = (cp.random.randn(ntheta, nz, n) + 1j * cp.random.randn(ntheta, nz, n)).astype('complex64')
 
+# Propagation stores the kernel separably (fker_y, fker_x); rebuild the dense
+# 2-D kernel here, since these sub-step timings feed it to conv2d.run directly.
+fker_j = cp.multiply(cl.fker_y[j][:, None], cl.fker_x[j][None, :])
+
 # D sub-steps (cuFFTDx)
 ff_pad = cp.empty([ntheta, 2*nz, 2*n], dtype='complex64')
 cl._fwd_pad(psi, ff_pad)
@@ -157,7 +166,7 @@ y_buf  = cp.empty_like(ff_pad)
 
 steps_D = {
     '_fwd_pad':    lambda: cl._fwd_pad(psi, ff_pad),
-    'conv2d.run':  lambda: cl._conv2d.run(ff_pad, cl.fker[j], y_buf),
+    'conv2d.run':  lambda: cl._conv2d.run(ff_pad, fker_j, y_buf),
     'crop':        lambda: y_buf[:, cl.nz//2:-cl.nz//2, cl.n//2:-cl.n//2],
     'D total':     lambda: cl.D(psi, j),
 }
@@ -166,12 +175,12 @@ steps_D = {
 ff_pad2 = cp.empty([ntheta, 2*nz, 2*n], dtype='complex64')
 cl._fwd_pad(psi, ff_pad2)
 ff_fft  = cp.fft.fft2(ff_pad2)
-ff_mul  = ff_fft * cl.fker[j]
+ff_mul  = ff_fft * fker_j
 
 steps_D_cupy = {
     '_fwd_pad':       lambda: cl._fwd_pad(psi, ff_pad2),
     'fft2':           lambda: cp.fft.fft2(ff_pad2),
-    'multiply fker':  lambda: ff_fft.__mul__(cl.fker[j]),
+    'multiply fker':  lambda: ff_fft.__mul__(fker_j),
     'ifft2(unnorm)':  lambda: cp.fft.ifft2(ff_mul, norm="forward"),
     'crop':           lambda: ff_mul[:, cl.nz//2:-cl.nz//2, cl.n//2:-cl.n//2],
     'D total':        lambda: cl_cupy.D(psi, j),
@@ -186,7 +195,7 @@ steps_DT = {
     'zero_pad+copy':  lambda: (cl._buf_big[:ntheta].fill(0),
                                cl._buf_big[:ntheta].__setitem__(
                                    (slice(None), slice(cl.nz//2,-cl.nz//2), slice(cl.n//2,-cl.n//2)), phi)),
-    'conv2d.run':     lambda: cl._conv2d.run(ff_zpad, cl.fker[j].conj(), y_buf2),
+    'conv2d.run':     lambda: cl._conv2d.run(ff_zpad, fker_j.conj(), y_buf2),
     '_adj_pad':       lambda: cl._adj_pad(y_buf2, cp.empty([ntheta, nz, n], dtype='complex64')),
     'DT total':       lambda: cl.DT(phi, j),
 }
@@ -200,12 +209,12 @@ def _zpad(phi, ntheta, nz, n, cl):
 ff_zpad2 = cp.zeros([ntheta, 2*nz, 2*n], dtype='complex64')
 ff_zpad2[:, cl.nz//2:-cl.nz//2, cl.n//2:-cl.n//2] = phi
 ff_fft3  = cp.fft.fft2(ff_zpad2)
-ff_mul3  = ff_fft3 * cl.fker[j].conj()
+ff_mul3  = ff_fft3 * fker_j.conj()
 
 steps_DT_cupy = {
     'zeros+copy':      lambda: _zpad(phi, ntheta, nz, n, cl),
     'fft2':            lambda: cp.fft.fft2(ff_zpad2),
-    'multiply fker_c': lambda: ff_fft3.__mul__(cl.fker[j].conj()),
+    'multiply fker_c': lambda: ff_fft3.__mul__(fker_j.conj()),
     'ifft2(unnorm)':   lambda: cp.fft.ifft2(ff_mul3, norm="forward"),
     '_adj_pad':        lambda: cl._adj_pad(ff_mul3, cp.empty([ntheta, nz, n], dtype='complex64')),
     'DT total':        lambda: cl_cupy.DT(phi, j),
