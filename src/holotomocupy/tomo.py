@@ -2,8 +2,14 @@ import math
 import numpy as np
 import cupy as cp
 import cupyx.scipy.fft as cufft
-from .cuda_kernels import gather_kernel
+from .cuda_kernels import (gather_kernel, sample_tiles_kernel,
+                           scatter_binned_kernel)
 from .utils import redot, logger
+
+# RT's largest tile, and the cap on samples per block.  Both measured on an
+# A100 over n = 256..4736; 64 is also as large as 48 kB of shared memory allows.
+TILE    = 64
+SUBSIZE = 2048
 
 
 class Tomo:
@@ -12,25 +18,14 @@ class Tomo:
     def __init__(self, n, nz, theta, mask_r, nd=None):
         """Usfft parameters.
 
-        `nd` is the number of detector samples per projection, i.e. the width of
-        the sinogram/projection plane.  It defaults to `n` (detector pixel ==
-        object pixel); the only other supported value is `2*n`, a detector twice
-        as finely sampled over the *same* field of view.  The Fourier step along
-        the detector stays 1/n either way, so R and RT remain an exact adjoint
-        pair and the sinogram *values* are unchanged -- only sampled more densely.
+        `nd` is the detector width, `n` (default) or `2*n` -- twice as finely
+        sampled over the same field of view.  The Fourier step stays 1/n either
+        way, so the sinogram values are unchanged and R/RT stay an adjoint pair.
 
-        Detector bins whose Cartesian frequency (fr*cos, -fr*sin) falls outside
-        the padded FFT's square -- they only exist once nd > n -- are skipped
-        and read back as zero: the object lives on the n grid, so its spectrum
-        is the square |kx|, |ky| <= 1/2, and the sinogram is the band-limited
-        interpolation of the coarse one onto the nd grid.  The test is on the
-        Cartesian pair, not on |fr|, so the square's corners -- out to
-        |fr| = sqrt(2)/2 at 45 deg -- are kept.  (Letting the gather index wrap
-        instead, as ~/APS_PXM/tomo_usfft does, models the object as a delta
-        comb; at nd = 2n that makes theta = 0 and 90 read an n-periodic spectrum
-        and come out as combs with every odd detector sample exactly zero,
-        which backprojects to vertical and horizontal line artifacts.  See the
-        gather kernel.)
+        Detector bins falling outside the padded FFT's square, which only exist
+        once nd > n, are skipped and read back as zero: the object's spectrum is
+        that square, so the sinogram is the band-limited interpolation of the
+        coarse one.  Letting them wrap instead gives line artifacts.
         """
         nd = n if nd is None else int(nd)
         if nd not in (n, 2 * n):
@@ -83,6 +78,122 @@ class Tomo:
         self._plan_2d  = cufft.get_fft_plan(self._buf_fde,  axes=(-2, -1), value_type='C2C')
         self._plan_1d  = cufft.get_fft_plan(self._buf_sino, axes=(-1,),    value_type='C2C')
 
+        self._bins = None             # RT's index, built on first use
+
+    # ----------------------------------------------------------------- bins
+
+    def _build_bins(self):
+        """Sample lists per tile of the padded grid, for the binned scatter.
+
+        Each sample is listed in every tile its 2m+1 stencil touches, so a
+        block can clip to its own tile and write nothing outside it.  theta and
+        the detector grid are fixed for a `Tomo`'s lifetime, so this is built
+        once and amortised over every RT.
+
+        Counting first and placing second recomputes the geometry instead of
+        keeping the pairs: one global sort would need 3.0 GB against 276 MB of
+        output, and the geometry kernel is only a few flops per sample.
+        """
+        n, nd, twon = self.n, self.nd, 2 * self.n
+        m, subsize  = self.pars[0], SUBSIZE
+        span = 2 * m + 1
+        # b need not divide 2n -- the last row and column are just narrower --
+        # but every tile must be at least a stencil wide, or a stencil could
+        # straddle three tiles and sample_tiles only records four corners.
+        # Skip b+1 divisible by 32: that is the shared row stride, and a
+        # multiple of 32 puts every row on the same bank (20% on RT at n=2500).
+        b = next((t for t in range(min(TILE, twon - 1), span - 1, -1)
+                  if (twon % t == 0 or twon % t >= span) and (t + 1) % 32), 0)
+        if b < span:
+            raise ValueError(
+                f"RT: no tile <= {TILE} fits n={n} (2n={twon}, stencil {span})")
+        ntx   = -(-twon // b)             # ceil: the last tile may be partial
+        ntile = ntx * ntx
+        grid  = lambda na: (math.ceil(nd / 32), math.ceil(na / 32), 1)
+        # Chunked over angles so the transient 4-per-sample candidate array
+        # stays bounded; everything below is O(chunk), not O(ntheta).
+        chunk = max(1, 2097152 // nd)
+        spans = [(a0, min(chunk, self.ntheta - a0))
+                 for a0 in range(0, self.ntheta, chunk)]
+
+        # Pass 1: how many (sample, tile) pairs land in each tile.
+        counts = cp.zeros(ntile, dtype='int64')
+        for a0, na in spans:
+            out = cp.empty(na * nd * 4, dtype='int32')
+            sample_tiles_kernel(grid(na), (32, 32, 1),
+                                (out, self.theta, m, n, nd, a0, na, b, ntx))
+            counts += cp.bincount(out[out >= 0], minlength=ntile)
+            del out
+
+        # Pass 2: place each pair at its final offset.  Runs come out ordered
+        # by sample index, which keeps the scatter kernel's reads of g
+        # coalesced; ordering by detector bin instead measured 0.89x -> 0.82x.
+        offs = cp.concatenate((cp.zeros(1, 'int64'), cp.cumsum(counts)))
+        bin_samples = cp.empty(int(offs[-1]), dtype='int32')
+        cursor = offs[:-1].copy()
+        for a0, na in spans:
+            out = cp.empty(na * nd * 4, dtype='int32')
+            sample_tiles_kernel(grid(na), (32, 32, 1),
+                                (out, self.theta, m, n, nd, a0, na, b, ntx))
+            keep = out >= 0
+            tid  = out[keep]
+            sid  = cp.repeat(cp.arange(a0 * nd, (a0 + na) * nd, dtype='int32'),
+                             4)[keep]
+            del out, keep
+            # Radix sort, so it is stable: the four slots of one sample keep
+            # their order and the runs come out ordered by sample index.
+            order = cp.argsort(tid)
+            tid_s = tid[order]
+            cnt   = cp.bincount(tid, minlength=ntile)
+            del tid
+            # Element i of the sorted chunk sits at chunk-local offset
+            # i - local[t] within tile t, hence at global offset
+            # i + (cursor[t] - local[t]).  One gather, no second sort.
+            local = cp.cumsum(cnt) - cnt
+            dest  = cp.arange(tid_s.size, dtype='int64') + (cursor - local)[tid_s]
+            bin_samples[dest] = sid[order]
+            cursor += cnt
+            del order, tid_s, cnt, local, dest, sid
+
+        # Pass 3: polar density goes as 1/r, so central tiles hold ~100x what
+        # rim tiles do.  Bins longer than `subsize` are cut into subproblems
+        # that combine through global atomics, or the GPU waits on a few tiles.
+        counts = cp.asnumpy(counts).astype('int64')
+        start  = np.concatenate(([0], np.cumsum(counts)))
+        nsubs  = -(-counts // subsize)                     # ceil, 0 when empty
+        tile   = np.repeat(np.arange(ntile), nsubs)
+        k      = (np.arange(nsubs.sum())
+                  - np.repeat(np.cumsum(nsubs) - nsubs, nsubs))
+        beg    = start[tile] + k * subsize
+        end    = np.minimum(beg + subsize, start[tile + 1])
+
+        self._bins = dict(
+            b=b, ntx=ntx, subsize=subsize,
+            samples=bin_samples,
+            tile=cp.asarray(tile, dtype='int32'),
+            beg=cp.asarray(beg, dtype='int32'),
+            end=cp.asarray(end, dtype='int32'),
+            atomic=cp.asarray(nsubs[tile] > 1, dtype='uint8'),
+            nsub=len(tile), ntile=ntile, counts=counts,
+            shmem=2 * b * (b + 1) * 4,     # two padded planes, see the kernel
+        )
+        logger.info(f"Tomo binned scatter: {self.bin_stats()}")
+
+    def bin_stats(self):
+        """One-line summary of the binned scatter's index."""
+        z = self._bins
+        c = z['counts']
+        nz_ = c[c > 0]
+        mb = sum(a.nbytes for a in (z['samples'], z['tile'], z['beg'],
+                                    z['end'], z['atomic'])) / 2**20
+        return (f"tile {z['b']}x{z['b']}: {z['ntile']} tiles, "
+                f"{100 * len(nz_) / z['ntile']:.0f}% non-empty, "
+                f"samples/tile median {int(np.median(nz_))} max {int(nz_.max())}, "
+                f"{z['nsub']} subproblems "
+                f"({100 * float(cp.mean(z['atomic'])):.0f}% combining), "
+                f"index {mb:.0f} MB, duplication "
+                f"{c.sum() / (self.ntheta * self.nd):.2f}x")
+
     def R(self, obj):
         """Radon transform"""
         nz = obj.shape[0]
@@ -98,13 +209,13 @@ class Tomo:
             cufft.fft2(self._buf_fde, overwrite_x=True)
         self._buf_fde *= c2dfftshift
         # STEP2: NUFFT gather into full buf_sino (extra slices are zero, no effect).
-        # No memset needed: with dir==0 the gather kernel starts each thread from
-        # g0 = 0 and *assigns* g[g_ind], covering every element of _buf_sino.
+        # No memset needed: the gather kernel starts each thread from g0 = 0 and
+        # *assigns* g[g_ind], covering every element of _buf_sino.
         gather_kernel(
             (math.ceil(self.nd / 32), math.ceil(self.ntheta / 32), self._nz),
             (32, 32, 1),
             (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.nd,
-             self.ntheta, self._nz, 0),
+             self.ntheta, self._nz),
         )
         # STEP3: 1D IFFT on full buf_sino
         self._buf_sino *= c1dfftshift
@@ -132,13 +243,19 @@ class Tomo:
         with self._plan_1d:
             cufft.fft(self._buf_sino, overwrite_x=True)
         self._buf_sino *= c1dfftshift
-        # STEP2: NUFFT scatter from full buf_sino (extra slices are zero, contribute nothing)
+        # STEP2: NUFFT scatter from full buf_sino (extra slices are zero,
+        # contribute nothing).  The fill is needed because a split tile
+        # accumulates into f rather than storing, and empty tiles are skipped.
         self._buf_fde.fill(0)
-        gather_kernel(
-            (math.ceil(self.nd / 32), math.ceil(self.ntheta / 32), self._nz),
-            (32, 32, 1),
-            (self._buf_sino, self._buf_fde, self.theta, m, mua, n, self.nd,
-             self.ntheta, self._nz, 1),
+        if self._bins is None:
+            self._build_bins()
+        z = self._bins
+        scatter_binned_kernel(
+            (z['nsub'], self._nz), (256,),
+            (self._buf_fde, self._buf_sino, self.theta,
+             z['samples'], z['tile'], z['beg'], z['end'], z['atomic'],
+             m, mua, n, self.nd, self.ntheta, self._nz, z['b'], z['ntx']),
+            shared_mem=z['shmem'],
         )
         # STEP3: 2D IFFT on full buffer (always matches plan)
         self._buf_fde *= c2dfftshift
