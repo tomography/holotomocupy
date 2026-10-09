@@ -1,4 +1,4 @@
-# AtomiumS1 — SINGLE-distance, ±300 px random displacement, 4.5 nm voxels
+# AtomiumS1_FT_RD300 — SINGLE-distance, ±300 px random displacement, 4.5 nm voxels
 
 ESRF ID16A, proposal **blc17322**, beamtime 20260825.
 Atomium sample S1, **one** propagation distance, 12000 projections over 180°,
@@ -406,6 +406,23 @@ There is no justification for changing the configs, particularly as step 6
 optimises per-projection positions and can absorb a constant offset of this size.
 
 ## Drift — 114 px vertical, nothing horizontal
+
+> **Superseded as of 2026-10-07: step 3 now measures this itself.**
+> `estimate_quali_motion.py` runs between the random shifts and the rhapp
+> search, correlating each post-scan retake against its in-scan twin and
+> fitting a mean-removed quadratic through the three points — see the
+> ["Sample drift" section of the HT_RD300
+> README](../AtomiumS1_HT_RD300/README.md#sample-drift-from-the-post-scan-retakes)
+> for the method, which is shared. **No ESRF shift file is read by the pipeline
+> any more**, `correct_motion.txt` included; it is a `--validate` target now.
+>
+> It is the same retake pair the failed attempt below used, and it avoids that
+> trap by flat-field correcting first, subtracting a static template, and
+> **predicting** where the detector-fixed illumination will correlate
+> (`r_retake − r_scan`, known from the shift table) so that peak can be masked
+> rather than hoped away. The sections below are the investigation that
+> established the 114 px number and are kept as the independent cross-check it
+> is validated against.
 
 The installed `correct_motion.txt` carries a **vertical** drift ramping to
 114 raw px over the scan and an **identically zero** horizontal column. Both
@@ -823,6 +840,16 @@ Step 3 sums the two —
 shifts_final = random_shifts + rhapp_shifts + motion_shifts + correct3d_shifts
 ```
 
+> **As shipped, two of those four terms are zero.** `motion_src=none`, so
+> `motion_shifts` is identically zero and step 7 owns the whole drift; and
+> `correct3D` is not read any more — step 7 writes
+> `correct_correct3D_extra.txt`, which **step 6** applies, not step 3. The
+> retake estimator that would fill `motion_shifts` exists but is not validated:
+> it reads ≈ 0 wherever the true drift is below ~20 object px. See ["What the
+> retake estimator actually does" in the HT_RD300
+> README](../AtomiumS1_HT_RD300/README.md#what-the-retake-estimator-actually-does--why-motion_srcnone).
+> The rest of this section is the research log from when both terms were live.
+
 — so the drift measured from the retakes stays in the file it was measured into,
 and this file carries only what the tomography asked for. Two columns, `x` then
 `y`, `ntheta` rows, **unbinned** object-grid px (the solver multiplies its bin-`b`
@@ -1066,7 +1093,7 @@ have been in play:
 |---|---|---|
 | 120 | Peter's octave driver for `../AtomiumL1_HT` and `../AtomiumS2` — **but at 33.35 keV** | 2.01 µm = 447 unbinned voxels |
 | 32 | that value energy-scaled to 17.1 keV: away from an edge `δ ~ E⁻²` and `β ~ E⁻⁴`, so `δ/β ~ E²` and `120 · (17.1/33.35)² = 31.6` | 825 nm = 183 voxels |
-| **35** | **what the configs use** (Viktor, 2026-09-11) — essentially the energy-scaled 31.6, rounded up, and the same value `../AtomiumS1_HT` carries | 862 nm = 192 voxels |
+| **35** | **what the configs use** (Viktor, 2026-09-11) — essentially the energy-scaled 31.6, rounded up, and the same value `../AtomiumS1_HT_RD300` carries | 862 nm = 192 voxels |
 | 20 | what they used until 2026-09-11 — chosen by hand for a sharper, noisier start | 652 nm = 145 voxels |
 
 Only the step-6 *starting point* depends on this; the iterative solve is free to
@@ -1127,12 +1154,29 @@ use it again.
 ## Step 7 — refining the per-angle drift
 
 [`step7.py`](step7.py) re-projects a step-6 checkpoint and searches for the
-per-angle shift that minimises the entropy of the FBP. One GPU, no MPI:
+per-angle shift that minimises the entropy of the FBP:
 
 ```bash
 python step7.py config_step6_bin2.conf --dry-run      # geometry and units
-python step7.py config_step6_bin2.conf                # ~20 min
+python step7.py config_step6_bin2.conf                # ~20 min, one GPU
+mpirun -np 4 ../../demo/bind.sh python step7.py config_step6_bin2.conf
 ```
+
+Under `mpiexec`/`mpirun` the **z slices are split over the ranks** and the
+256-bin histogram is allreduced, so every rank runs the same Nelder-Mead on
+the same numbers and the answer does not depend on the rank count — checked
+bit-for-bit on this scan, 1 rank against 4, identical `correct_correct3D_extra.txt`
+and identical shifts. Outside a launcher nothing imports `mpi4py` and the old
+single-GPU path is untouched. Measured 29.1 s → 8.4 s on four A100s (3.46×)
+for a short ladder; what does not scale is the shift, 4% of an evaluation,
+which every rank has to repeat because a vertical shift mixes z. `-n` cannot
+exceed `--nslice` (64). `polaris_run.sh` runs it on 8 ranks.
+
+The search uses **a quarter of the scan's angles**, on an even stride — the
+drift is a low-order curve over 180°, so the full set oversamples it fourfold
+and costs four times as much per evaluation. `--ntheta` overrides it. The
+output file still carries a row for every angle in the scan, because the fit
+is a polynomial and is evaluated back onto the full grid.
 
 It writes `correct_correct3D_extra.txt` into this directory, in Peter's layout
 and binned pixels. Step 6 adds it to the positions it reads

@@ -11,7 +11,10 @@
 # is already open means no MobilePASS+ prompt.
 set -euo pipefail
 
-DEST=polaris:holotomocupy_gpu_reduced/
+# The FQDN, not the `polaris` alias: a stray `Host polaris / HostName polaris`
+# stanza at the top of ~/.ssh/config shadows the real one, and the bare alias
+# then fails with "No route to host".
+DEST=polaris.alcf.anl.gov:holotomocupy_gpu_reduced/
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/"
 
 # --delete makes this a mirror.  Each exclusion is therefore also a promise
@@ -41,6 +44,7 @@ EXCLUDES=(
     --exclude 'slurm-*.out'
     --exclude 'nodes.good.*'
     --exclude '*.swp'
+    --exclude 'tmp/'
     --exclude 'demo/demo_out/'
     --exclude 'tests/mosaic_brain/data/'
 )
@@ -53,6 +57,7 @@ PROTECT=(
     -f 'P correct_correct3D*.txt'
     -f 'P step7_it*'
     -f 'P conv*.csv'
+    -f 'P shifts.png'
 )
 
 DRY=()

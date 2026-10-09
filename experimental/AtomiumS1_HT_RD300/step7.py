@@ -1,20 +1,19 @@
 #!/usr/bin/env python
 """
-Step 7 — per-angle drift refinement by entropy autofocus (one GPU, no MPI).
+Step 7 — per-angle drift refinement by entropy autofocus.
 
-    python step7.py config_step6_bin2.conf [options]
+    python step7.py config_step6_bin2.conf [options]              one GPU
+    mpiexec -n 8 ... set_affinity_gpu_polaris.sh python step7.py ...   eight
+
+Under MPI the z slices are split over the ranks and the 256-bin histogram is
+allreduced, so every rank runs the same Nelder-Mead on the same numbers and
+only rank 0 writes.  The answer does not depend on the rank count.
 
 Takes the step-6 checkpoint, re-projects a slab of it, and searches for the
 per-angle shift that minimises the entropy of the FBP.  Writes
 `correct_correct3D_extra.txt` NEXT TO THE CONFIG (--out overrides), which is
 exactly where step 6 looks for it; step 6 adds it to the positions it reads,
 so the next run is a step-6 rerun and nothing else.
-
-CAVEAT.  The volume this re-projects was reconstructed with the shifts already
-in place, so on a converged reconstruction part of what comes out is the
-metric's own bias -- 1.7 px vertical / 10.7 px horizontal ptp on the ctxl FT
-deg-7 null run.  Run `tests/find_shifts_extra` on the same geometry and
-compare before shipping an answer.
 """
 import argparse
 import glob
@@ -29,7 +28,8 @@ import cupy as cp
 from holotomocupy.autofocus import (EXTRA_NAME, Focus, ShiftFourier,
                                     cylinder_mask, fit_drift, grey_range,
                                     project_chunked, rigid_part, scan_theta,
-                                    summary_png, write_correct3d_extra)
+                                    summary_png, write_correct3d_extra,
+                                    z_split)
 from holotomocupy.config import parse_args
 from holotomocupy.tomo import Tomo
 
@@ -42,7 +42,7 @@ def parse():
                    help='checkpoint to read (0 = the highest one present)')
     p.add_argument('--ntheta', type=int, default=None,
                    help='angles to search at, on an even stride '
-                        '(default: every angle in the scan)')
+                        '(default: a quarter of the scan)')
     p.add_argument('--nslice', type=int, default=64,
                    help='centred z slices; every evaluation reconstructs all '
                         'of them, so this is the cost knob')
@@ -50,7 +50,7 @@ def parse():
                    help='extra x/y binning LEVEL on top of the checkpoint, '
                         'factor 2**bin as everywhere else: 0 = none (default), '
                         '1 = 2x2, 2 = 4x4')
-    p.add_argument('--deg', type=int, default=7, help='Legendre degree')
+    p.add_argument('--deg', type=int, default=9, help='Legendre degree')
     p.add_argument('--maxfev', type=int, default=400,
                    help='Nelder-Mead budget PER degree')
     p.add_argument('--zchunk', type=int, default=32,
@@ -61,6 +61,19 @@ def parse():
     p.add_argument('--dry-run', action='store_true',
                    help='print the geometry and the units, then stop')
     return p.parse_args()
+
+
+def mpi_comm():
+    """COMM_WORLD when launched under mpiexec with >1 rank, else None.
+
+    Keyed on the launcher's env so a plain `python step7.py` never initialises
+    MPI and behaves exactly as it did before.
+    """
+    if not any(k in os.environ for k in
+               ('PMI_RANK', 'PMIX_RANK', 'OMPI_COMM_WORLD_RANK')):
+        return None
+    from mpi4py import MPI
+    return MPI.COMM_WORLD if MPI.COMM_WORLD.size > 1 else None
 
 
 def latest_checkpoint(path_out, want):
@@ -103,12 +116,21 @@ def checkpoint_shape(ckpt):
 
 def main():
     a = parse()
+    comm = mpi_comm()
+    rank, size = (0, 1) if comm is None else (comm.rank, comm.size)
+    log = print if rank == 0 else (lambda *x, **k: None)
+    # set_affinity_gpu_polaris.sh pins one GPU per rank; without it the ranks
+    # would all pile onto device 0
+    if comm is not None and 'CUDA_VISIBLE_DEVICES' not in os.environ:
+        cp.cuda.Device(rank % cp.cuda.runtime.getDeviceCount()).use()
+
     # default --out is the config's own directory, which is where step 6
     # looks for correct_correct3D_extra.txt
     if a.out is None:
         a.out = os.path.dirname(os.path.abspath(a.config)) or '.'
     cfg = parse_args(a.config)
-    os.makedirs(a.out, exist_ok=True)
+    if rank == 0:
+        os.makedirs(a.out, exist_ok=True)
 
     ckpt, it = latest_checkpoint(cfg.path_out, a.iter)
     up = cfg.tomo_upsample
@@ -121,7 +143,14 @@ def main():
     nb = 2 ** max(0, a.bin)
     n = nck // nb
     nbz = nb * up
-    nzc = min(a.zchunk or a.nslice, a.nslice)
+    nz = min(a.nslice, nzck // nbz)
+    if size > nz:
+        raise SystemExit(f'{size} ranks for {nz} z slices; run with fewer')
+    # Size Tomo by THIS RANK's chunk, not by the whole slab: RT zero-pads a
+    # short chunk up to the buffer it was built with, so an oversized Tomo
+    # would pay the full single-GPU cost on every rank.
+    zlo, zhi = z_split(nz, rank, size)
+    nzc = min(a.zchunk or (zhi - zlo), zhi - zlo)
 
     # One search pixel in the units of Peter's file.  The projection plane at
     # bin 0 is nobj*2**bin*tomo_upsample raw detector px wide and the search
@@ -133,28 +162,31 @@ def main():
 
     with h5py.File(cfg.in_file, 'r') as f:
         ntheta_scan = len(f['/exchange/theta'])
-    if a.ntheta is None:              # default: use them all
-        a.ntheta = ntheta_scan
+    # A quarter of the scan: the drift is a low-order curve over 180 deg, so
+    # every angle oversamples it and costs 4x the evaluation.
+    if a.ntheta is None:
+        a.ntheta = max(1, ntheta_scan // 4)
     theta_deg, theta = scan_theta(cfg.in_file, a.ntheta)
 
-    print(f'config   {a.config}')
-    print(f'  object {cfg.nzobj} x {cfg.nobj}^2 at bin {cfg.bin}, '
-          f'tomo_upsample {up}  ({nobj0} x/y at bin 0)')
-    print(f'  ckpt   {ckpt}  (iteration {it}, {nzck} x {nck}^2)')
-    print(f'search   {a.ntheta} of {ntheta_scan} angles, grid {n} '
-          f'(bin {nb} in x/y, {nbz} in z), {a.nslice} slices, '
-          f'{nzc} per chunk, degree {a.deg}')
-    print(f'angles   {theta_deg[0]:.4f}..{theta_deg[-1]:.4f} deg from '
-          f'{cfg.in_file}::/exchange/theta, negated as step 5 does')
-    print(f'units    1 search px = {raw_per_px:g} raw detector px = '
-          f'{scale:g} file px at correct3d_bin={cfg.correct3d_bin}')
+    log(f'config   {a.config}')
+    log(f'  object {cfg.nzobj} x {cfg.nobj}^2 at bin {cfg.bin}, '
+        f'tomo_upsample {up}  ({nobj0} x/y at bin 0)')
+    log(f'  ckpt   {ckpt}  (iteration {it}, {nzck} x {nck}^2)')
+    log(f'search   {a.ntheta} of {ntheta_scan} angles, grid {n} '
+        f'(bin {nb} in x/y, {nbz} in z), {nz} slices, '
+        f'{nzc} per chunk, degree {a.deg}')
+    log(f'ranks    {size} over {nz} z slices ({zhi - zlo} on rank 0); the '
+        f'sinogram and the shift are replicated, the FBP is not')
+    log(f'angles   {theta_deg[0]:.4f}..{theta_deg[-1]:.4f} deg from '
+        f'{cfg.in_file}::/exchange/theta, negated as step 5 does')
+    log(f'units    1 search px = {raw_per_px:g} raw detector px = '
+        f'{scale:g} file px at correct3d_bin={cfg.correct3d_bin}')
     if a.dry_run:
         return
 
     t0 = time.time()
     obj = read_slab(ckpt, nb, nbz, a.nslice)
-    nz = obj.shape[0]
-    print(f'read     {obj.shape} in {time.time()-t0:.1f} s')
+    log(f'read     {obj.shape} in {time.time()-t0:.1f} s')
 
     cl = Tomo(n, nzc, theta, -1.0)                 # sized by the CHUNK
     sh = ShiftFourier(nz, n)                       # the shift is global in z
@@ -163,33 +195,39 @@ def main():
     d = project_chunked(cl, obj, nzc)
     cp.cuda.Stream.null.synchronize()
     del obj
-    print(f'project  {tuple(d.shape)} in {time.time()-t0:.1f} s')
+    log(f'project  {tuple(d.shape)} in {time.time()-t0:.1f} s')
 
     t0 = time.time()
     lo, hi = grey_range(cl, d, sel, nzc)
-    print(f'score    entropy, 256 bins in [{lo:.4g}, {hi:.4g}] from the '
-          f'uncorrected FBP ({time.time()-t0:.1f} s)')
+    # from rank 0 only: the bins must be identical or the ranks are summing
+    # histograms of different things
+    if comm is not None:
+        lo, hi = comm.bcast((lo, hi), root=0)
+    log(f'score    entropy, 256 bins in [{lo:.4g}, {hi:.4g}] from the '
+        f'uncorrected FBP ({time.time()-t0:.1f} s)')
 
-    fc = Focus(cl, sh, d, theta, sel, lo, hi, nzc)
+    fc = Focus(cl, sh, d, theta, sel, lo, hi, nzc, comm=comm)
     q0, mid0 = fc.sweep(np.zeros((a.ntheta, 2), 'float32'), want_mid=True)
-    print(f'         entropy at no correction {q0:.5f}')
+    log(f'         entropy at no correction {q0:.5f}')
 
     t0 = time.time()
-    print(f'Nelder-Mead from zero, degree 1 to {a.deg}, '
-          f'<= {a.maxfev} evaluations per degree:')
+    log(f'Nelder-Mead from zero, degree 1 to {a.deg}, '
+        f'<= {a.maxfev} evaluations per degree:')
     fc.trace.clear()
-    coef, rungs = fit_drift(fc, a.deg, maxfev=a.maxfev)
+    coef, rungs = fit_drift(fc, a.deg, maxfev=a.maxfev, log=log)
     s = fc.s_of(np.linalg.lstsq(fc.V, coef.ravel(), rcond=None)[0])
     q1, mid1 = fc.sweep(s, want_mid=True)
-    print(f'  {len(fc.trace)} evaluations, {fc.nit} iterations, '
-          f'{time.time()-t0:.1f} s;  entropy {q1:.5f}, '
-          f'{q1 - q0:+.5f} against no correction (negative is better)')
-    print(f'  found    y ptp {np.ptp(s[:, 0]):.3f}  x ptp {np.ptp(s[:, 1]):.3f} '
-          f'search px')
-    print('  of which a rigid object shift of ' + '/'.join(
+    log(f'  {len(fc.trace)} evaluations, {fc.nit} iterations, '
+        f'{time.time()-t0:.1f} s;  entropy {q1:.5f}, '
+        f'{q1 - q0:+.5f} against no correction (negative is better)')
+    log(f'  found    y ptp {np.ptp(s[:, 0]):.3f}  x ptp {np.ptp(s[:, 1]):.3f} '
+        f'search px')
+    log('  of which a rigid object shift of ' + '/'.join(
         f'{v:+.2f}' for v in rigid_part(s, fc.G)[2])
         + ' px in z/y/x, which no tomogram can see')
 
+    if rank != 0:
+        return
     tag = os.path.join(a.out, f'step7_it{it}_n{n}_th{a.ntheta}_nz{nz}')
     np.savetxt(f'{tag}_shifts.csv', np.column_stack([theta_deg, s]),
                delimiter=',', header='theta_deg,sy,sx', comments='')

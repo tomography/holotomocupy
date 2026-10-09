@@ -16,7 +16,7 @@ checks agree, on all four 20260829 scans:
     as the HORIZONTAL term);
   - steps15.py:670 reads it as `[:ntheta, ::-1]`, and holotomocupy shifts are
     (y, x), so the file must be (x, y).
-../AtomiumS1/plot_correct3d.py's docstring states the opposite and is wrong;
+../AtomiumS1_FT_RD300/plot_correct3d.py's docstring states the opposite and is wrong;
 its panels are mislabelled.
 """
 import argparse

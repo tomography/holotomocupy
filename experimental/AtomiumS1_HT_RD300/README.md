@@ -1,4 +1,4 @@
-# Atomium S1 — 4-distance HT, 4.5 nm voxels
+# AtomiumS1_HT_RD300 — 4-distance HT, ±300 px random displacement, 4.5 nm voxels
 
 `Atomium_S1_HT_4K_RD300_004p5nm_0004`, ESRF ID16A visit **blc17322**, on eagle at
 
@@ -9,7 +9,7 @@
 4000 projections over 180°, four propagation distances, 4096² frames at a 4.5 nm
 voxel, ±300 detector px of commanded random displacement. This is the
 **holotomography** scan of the sample whose **single-distance** scan lives in
-[`../AtomiumS1`](../AtomiumS1) — same sample, same energy, same voxel, so the two
+[`../AtomiumS1_FT_RD300`](../AtomiumS1_FT_RD300) — same sample, same energy, same voxel, so the two
 are meant to be compared and several numbers here are deliberately taken from
 that sibling rather than re-tuned.
 
@@ -29,7 +29,7 @@ here and what has actually been established on *this* scan.
 The scan directory is EDF-only: frames and an `.info` sidecar per plane, no
 NXtomo. That is the **`edfinfo`** flavour of [`esrf_layout.py`](esrf_layout.py),
 and it is why this directory's `esrf_layout.py` was taken from
-[`../AtomiumS1`](../AtomiumS1) rather than from `ctxl_HT` — ctxl's copy has only
+[`../AtomiumS1_FT_RD300`](../AtomiumS1_FT_RD300) rather than from `ctxl_HT` — ctxl's copy has only
 `bliss`, `ewoks` and `nxvds`. Everything geometric below is read out of the
 `.info` files by that flavour; nothing is retyped into the configs except
 `rotation_center_shift`, `nobj` and `paganin`.
@@ -139,7 +139,7 @@ disagreement, so what is in the configs is checked rather than trusted.
 > side. **Do not restore it.**
 
 > **The FT sibling's axis is +10.74, and it is not used here.**
-> [`../AtomiumS1`](../AtomiumS1)'s `naburec/` states it. Borrowing a sibling's
+> [`../AtomiumS1_FT_RD300`](../AtomiumS1_FT_RD300)'s `naburec/` states it. Borrowing a sibling's
 > axis is the rule when a scan has nothing of its own — [`../ctxl_FT`](../ctxl_FT_4K_RD300_007p5nm)
 > does exactly that — but this scan now has its own nabu number, and the 40.2 px
 > between the two is a real difference in where the stage sat: ctxl_HT and
@@ -153,46 +153,200 @@ silently shifts the object between levels.
 
 ## Shifts
 
-`shifts_final = random_shifts + rhapp_shifts + motion_shifts + correct3d_shifts`,
-and step 3 reads each file as `np.loadtxt(path)[:ntheta, ::-1]` — **file column 0
-is x, column 1 is y**.
+```
+shifts_final = random_shifts + motion_shifts + rhapp_shifts      (step 3)
+             + the rotation axis, into the horizontal column     (step 4b)
+```
 
-| term | source | state |
+> **The drift term is OFF as shipped: `motion_src=none`.** The retake
+> estimator below is not validated — see "What the retake estimator actually
+> does" — so step 3 carries `random + rhapp` only and step 7 owns the whole
+> drift, which is what the pipeline did before the estimator existed. Set
+> `motion_src=quali` in `config_steps15.conf` to switch it on, and only on a
+> scan where `estimate_quali_motion.py --validate` has been checked against
+> that scan's own `quali.mat`. The rhapp cache is named per setting
+> (`rhapp_measured.npy` / `rhapp_measured_quali.npy`) because rhapp is
+> measured with the drift already undone, so the two cannot share a file.
+
+Three terms in step 3, and **all three are measured here** — no ESRF shift file
+is read by the pipeline any more. `correct_motion.txt`, `correct_correct3D.txt`
+and `rhapp.mat` are still on disk and still worth comparing against, but they
+are inputs to `--validate`, not to the reconstruction.
+
+| term | where it comes from | size on this scan |
 |---|---|---|
-| random | `<pfile>/projections/<pfile>_000k.txt` | **MISSING** |
-| rhapp | `<pfile>_/rhapp.mat`, `rhapp_bin=2` | present |
-| motion | `<pfile>_3_/correct_motion.txt` | present, 4004 rows |
-| correct3d | `<pfile>_/correct_correct3D.txt`, `correct3d_bin=2` | present, **Peter's own** since 2026-09-08, 4001 rows |
+| random | `<pfile>/projections/<pfile>_000k.txt`, read `[:ntheta, ::-1]` — **file column 0 is x, column 1 is y** | ±300 px |
+| motion | `estimate_quali_motion.py`, from the post-scan retakes | ~16.5 raw px vertical |
+| rhapp | `estimate_rhapp.py`, from the frames | 270–390 object px |
+| axis | `estimate_axis_paganin.py` in step 4b, on bin-0 phase | −29.48 |
 
-### The drift is five times ctxl_HT's
+### Sample drift, from the post-scan retakes
 
-`reference_motion.mat` carries the same drift as `correct_motion.txt`, negated,
-so its size was known before the file arrived: **8.27 binned px = 16.5 raw px
-vertical**, 2.31 binned = 4.6 raw px horizontal, against ctxl_HT's 1.62 raw px.
-Far too large to leave out.
+Every plane's scan writes `ntheta+3` frames. The last three re-take omega
+**180, 90, 0** immediately after the scan ends, so each one correlated against
+its in-scan twin says how far the sample moved in between:
 
-Step 3 re-derives it as
-`correct_motion − random[ref_dist]` and compare against `ref_v`/`ref_h` — that
-is the check that the file was read in the right units and column order — but
-the subtraction needs the random displacement, so the comparison cannot be made
-yet.
+| point | in-scan frame | retake | value |
+|---|---|---|---|
+| omega 0 | `0` | `ntheta+2` | measured |
+| omega 90 | `ntheta/2` | `ntheta+1` | measured |
+| omega 180 | `ntheta` | — | `(0, 0)` **by construction** — it *is* the end of the scan |
 
-The retakes it is fitted from are in each plane's `quali.mat`; for the two that
-have been looked at (bin-2 px, `rot_positions` [0 90 180], index [0 2000 4000]):
+Three points, so a quadratic fits them exactly and the order is a constant in
+the code rather than a knob (`deg = min(npts-1, 2)`; a plane that loses a point
+to the quality guards drops to degree 1). The curve is **mean removed**, which
+is what reproduced Peter's `ref_v` exactly and what keeps the term from fighting
+the step-4b axis — a mean-removed curve contributes no net translation. The fit
+residual is meaningless here and is not reported as a quality number: an
+exactly-determined quadratic passes through all three points by construction.
+The honest error bar is the scatter across crops, propagated through the fit.
+
+**On HT this is four separate scans**, taken at different times and drifting
+independently, so it does not cancel in the plane-to-plane difference and
+`estimate_rhapp` is handed the drift to undo along with the commanded move. A
+motion term merely *added* to `shifts_final` would be re-measured by the rhapp
+search and counted twice.
+
+Three things make the correlation honest, and all three matter — the previous
+`estimate_motion.py` returned 0.15 px against a true ~118 px drift on the FT
+scan because it skipped the first:
+
+1. **Flat-field correction.** Raw frames correlate on the static illumination,
+   which does not move, and the peak locks at zero lag.
+2. **A static template**, the mean of frames spread over the scan with the two
+   being correlated nudged out of it, subtracted from both.
+3. **The illumination peak is predicted and masked.** Undoing the commanded
+   move puts the detector-fixed illumination at a *known* lag,
+   `r_retake − r_scan`, so a disc there is masked out instead of hoping a narrow
+   search window misses it. On an RD000 scan that lag *is* zero lag, the mask is
+   skipped, and the point is flagged unverifiable.
+
+The search window is 256 px, not ctxl's 40: FT_RD300's vertical drift reaches
+~113 object px and a 40 px window would never see it.
+
+#### Validation
+
+`python estimate_quali_motion.py config_steps15.conf --validate` compares
+against ESRF's own numbers without reconstructing anything, and this is the
+check that settles the sign:
+
+- `reference_motion.mat` `ref_v`/`ref_h` for the reference plane, compared
+  sign-agnostically. **This scan: 8.27 binned = 16.54 raw px vertical**,
+  2.31 binned = 4.6 raw horizontal — five times ctxl_HT's 1.62 raw px, far too
+  large to leave out.
+- `quali.mat` `corr_imagesafterscan`, the two measured points directly, on
+  Peter's 2×2-binned grid so **×2**:
 
 ```
 plane 1  corr_imagesafterscan = [ 0.588  -22.242 ;  2.602  -11.473 ; 0  0 ]
 plane 2                         [-2.012  -18.061 ;  3.680  -10.135 ; 0  0 ]
 ```
 
-`python estimate_motion.py config_steps15.conf --validate` re-measures the drift
-from those and writes an independent `./correct_motion.txt`, worth running as a
-cross-check the way it was on ctxl_HT. Note the horizontal column reaches −22
-binned px, far more than sample drift — that is the same contamination ctxl_HT
-showed, where the horizontal column of `correct_motion.txt` turned out to carry
-ESRF's rotation correction rather than drift. Read
-[`../ctxl_HT_4K_RD300_007p5nm/README.md`](../ctxl_HT_4K_RD300_007p5nm/README.md),
-"`correct_correct3D.txt` — what ESRF's third shift file is", before acting on it.
+> The horizontal column reaches −22 binned px, far more than sample drift. That
+> is the same contamination ctxl_HT showed, where the horizontal column of
+> `correct_motion.txt` carried ESRF's rotation correction rather than drift —
+> and it is a reason to read our horizontal against `quali.mat` with suspicion,
+> not a reason to distrust our own measurement. See
+> [`../ctxl_HT_4K_RD300_007p5nm/README.md`](../ctxl_HT_4K_RD300_007p5nm/README.md),
+> "`correct_correct3D.txt` — what ESRF's third shift file is".
+
+Both curves are drawn in `shifts.png` next to the config, motion in red against
+rhapp in blue, with the commanded displacement on its own axis.
+
+#### What the retake estimator actually does — why `motion_src=none`
+
+Measured on this scan, against all eight truth points (`quali.mat` ×2 on four
+planes, two omegas each). Per-plane vertical, truth first:
+
+| plane | truth, object px | measured |
+|---|---|---|
+| 1 | 44.48 | 51.98 |
+| 2 | 37.67 | 35.90 |
+| 3 | 16.52 | **1.39** |
+| 4 | 15.07 | **2.00** |
+
+Planes 1 and 2 come out roughly; planes 3 and 4 read ≈ 0 against a true 15–16
+px, and the horizontal column reads ≈ 0 on six of the eight points. The failure
+is a broad component at zero lag that outweighs the sample peak — at full phase
+correlation its height is 380 against a sample peak of 54.
+
+Four sweeps have tried to remove it and none worked:
+
+| sweep | knob | result |
+|---|---|---|
+| `sweep_highpass.py` | unsharp σ 0…64 | **worse**: rms 11.85 at σ 0, 23.53 at σ 32 |
+| `sweep_whiten.py` | `R/|R|^α`, zero-lag mask | rms 6.28, but only the mask helps, and the radius it needs (8 px) erases plane 4's true 5.96 px |
+| `sweep_destripe.py` | per-row / per-column mean, template 0 vs 32 | **no effect**: all four destripe modes tie at rms 6.28, so it is not stripes |
+| `sweep_tiles.py` | vote over 256/512/1024 px tiles | **every plane, every ω, every tile size votes 0.0**; 75–100 % of tiles within 3 px of zero, 0–4 % near truth |
+
+A radius-8 zero mask barely moves the answer, so the thing beating the sample
+is not a spike at zero but a broad blob centred there — which is also why the
+high-pass, which should have killed a smooth blob, instead killed signal.
+
+**The tile vote is the one that matters, and it says zero everywhere.** A
+smooth blob should carry almost no contrast across a 256 px tile, so the
+sample's fringes ought to win inside one. They do not: 75–100 % of tiles vote
+within 3 px of zero, on every plane and both omegas, and only 0–4 % land near
+Peter's number. That is consistent with two different worlds, and the tile
+table cannot separate them:
+
+- **(a)** the retake really does sit where its in-scan twin sits, so
+  `corr_imagesafterscan` is not the lag between that pair and our truth is
+  misassigned; or
+- **(b)** something detector-fixed owns the correlation at *every* scale, in
+  which case no filter was ever going to help.
+
+#### It is world (b): the correlator cannot measure a shift it is *given*
+
+[`sweep_selftest.py`](sweep_selftest.py) settles it. Two in-scan frames a few
+indices apart are seconds apart, so the sample cannot have drifted — but their
+commanded displacement is known exactly from the shift table, and on RD300 it
+is tens of px. `Layout.read_proj` is a raw EDF/nxvds read with **no**
+registration, so the frames really do differ by that amount.
+
+Thirteen pairs, commanded |Δ| from 26 to 55 detector px:
+
+```
+ pl     j0     j1 |  cmd dy  cmd dx |  full dy  full dx |  med dy  med dx | %near cmd  %near 0
+  1   3811   3812 |    6.67  -28.19 |      0.0      0.0 |     0.0     0.0 |        0%      94%
+  1     37     38 |   30.47   38.18 |      0.0      0.0 |     0.0     0.0 |        0%      94%
+  1   1591   1595 |   47.61   -5.13 |      0.0      0.0 |     0.0     0.0 |        0%      89%
+  2    999   1003 |   -5.02  -25.48 |      0.0      0.0 |     0.0     0.0 |        0%     100%
+  2   1813   1815 |   13.19   24.18 |      0.0      0.0 |     0.0     0.0 |        0%     100%
+  2    851    853 |  -46.07   -6.24 |     51.0      0.0 |     0.0     0.0 |        0%      72%
+  2   1295   1299 |  -37.03   19.14 |      0.0      0.0 |     0.0     0.0 |        0%      81%
+  3    666    668 |  -21.92   -9.75 |      0.0      0.0 |     0.0     0.0 |        0%     100%
+  3   2035   2036 |  -19.61   -7.97 |      0.0      0.0 |     0.0     0.0 |        0%     100%
+  3     74     75 |   14.77   45.04 |      0.0      0.0 |     0.0     0.0 |        0%      81%
+  3    814    817 |   22.65  -44.02 |      0.0      0.0 |     0.0     0.0 |        0%      83%
+  4   1924   1926 |  -22.55    7.32 |      0.0      0.0 |     0.0     0.0 |        0%      89%
+  4    481    483 |  -42.54    9.08 |     43.0     -1.0 |     0.0     0.0 |        0%      75%
+  4   1036   1040 |  -34.30   23.94 |     32.0     -2.0 |     0.0     0.0 |        0%      81%
+```
+
+**The tile vote reads 0.0 on all thirteen — 0 % near the commanded value,
+72–100 % near zero.** The whole-frame reads 0.0 on ten of thirteen. So the
+correlation on these flat-fielded frames is pinned to zero lag across the whole
+±50 px range, and the drift we were trying to measure (5–45 px) lies entirely
+inside it. **No filter was ever going to fix that**, which is exactly what the
+four sweeps above found the hard way.
+
+The three non-zero whole-frame rows are a warning, not a rescue: all three have
+a large *negative* commanded `dy` and come back with the **sign flipped**
+(+51.0 against −46.07, +43.0 against −42.54, +32.0 against −34.30), while their
+`dx` is never recovered at all (0, −1, −2 against −6.24, +9.08, +23.94). So the
+earlier apparent agreement on the two largest retake points — −43.14 against a
+truth of −44.48 — is not evidence that anything worked.
+
+**Why `rhapp` is unaffected.** Its signal sits at 270–390 object px, far
+outside the ±50 px zone the static owns, which is consistent with its own
+independent validation against `rhapp.mat` (corr 0.875–0.998). The same
+reasoning says anything measured on *phase* after Paganin — the step-4b axis —
+or on a finished volume — step 7 — is likewise unaffected, because neither
+correlates raw flat-fielded frames near zero lag.
+
+`motion_src=none`, step 7 owns the drift, and **this line of work is closed**:
+the limit is the data, not the filtering.
 
 ### `correct_correct3D.txt` — Peter's own, since 2026-09-08
 
@@ -257,7 +411,7 @@ to exactly that failure mode.
 ## `nobj` = 4096 — matched to the FT scan
 
 `nobj = nzobj = n` at every level (4096 / 2048 / 1024), the same as
-[`../AtomiumS1`](../AtomiumS1). No margin around the detector width at all;
+[`../AtomiumS1_FT_RD300`](../AtomiumS1_FT_RD300). No margin around the detector width at all;
 `mask_oob=1` drops whatever falls outside the grid.
 
 This is not the same trade the FT scan makes. Over there `ndist = 1` and
@@ -293,7 +447,7 @@ as E², giving 120×(17.1/33.35)² = 32 at this energy.
 
 It is not Peter's number *for this scan* — `ht_<pfile>.m` sets
 `delta_beta = 150` and calls it "ad-hoc" in the comment beside it — and it is
-not [`../AtomiumS1`](../AtomiumS1)'s 20 either, so the FT scan of this same
+not [`../AtomiumS1_FT_RD300`](../AtomiumS1_FT_RD300)'s 20 either, so the FT scan of this same
 sample is started from a slightly different filter. That matters less here than
 it would at ndist=1: with four distances the transport filter is doing much less
 of the work, and step 6 refines away from the init regardless. For reference,
@@ -415,12 +569,29 @@ use it again.
 ## Step 7 — refining the per-angle drift
 
 [`step7.py`](step7.py) re-projects a step-6 checkpoint and searches for the
-per-angle shift that minimises the entropy of the FBP. One GPU, no MPI:
+per-angle shift that minimises the entropy of the FBP:
 
 ```bash
 python step7.py config_step6_bin2.conf --dry-run      # geometry and units
-python step7.py config_step6_bin2.conf                # ~20 min
+python step7.py config_step6_bin2.conf                # ~7 min on one A100, one GPU
+mpirun -np 4 ../../demo/bind.sh python step7.py config_step6_bin2.conf
 ```
+
+Under `mpiexec`/`mpirun` the **z slices are split over the ranks** and the
+256-bin histogram is allreduced, so every rank runs the same Nelder-Mead on
+the same numbers and the answer does not depend on the rank count — checked
+bit-for-bit on this scan, 1 rank against 4, identical `correct_correct3D_extra.txt`
+and identical shifts. Outside a launcher nothing imports `mpi4py` and the old
+single-GPU path is untouched. Measured 29.1 s → 8.4 s on four A100s (3.46×)
+for a short ladder; what does not scale is the shift, 4% of an evaluation,
+which every rank has to repeat because a vertical shift mixes z. `-n` cannot
+exceed `--nslice` (64). `polaris_run.sh` runs it on 8 ranks.
+
+The search uses **a quarter of the scan's angles**, on an even stride — the
+drift is a low-order curve over 180°, so the full set oversamples it fourfold
+and costs four times as much per evaluation. `--ntheta` overrides it. The
+output file still carries a row for every angle in the scan, because the fit
+is a polynomial and is evaluated back onto the full grid.
 
 It writes `correct_correct3D_extra.txt` into this directory, in Peter's layout
 and binned pixels. Step 6 adds it to the positions it reads
@@ -439,9 +610,9 @@ same grid, angle count and slab, and treat an answer of that size as noise.
 
 ```bash
 ssh polaris
-cd ~/holotomocupy_gpu_reduced/experimental/AtomiumS1_HT   # /home/vvnikitin/... , not eagle
+cd ~/holotomocupy_gpu_reduced/experimental/AtomiumS1_HT_RD300   # /home/vvnikitin/... , not eagle
 source ../polaris_env.sh
-qsub polaris_run.sh                                   # steps15 + bin2 + bin1 + bin0
+qsub polaris_run.sh            # 2 nodes, 18 h, preemptable: the full two-pass ladder
 qstat -u $USER
 ```
 
@@ -450,26 +621,91 @@ aborts the job if it fails — so a missing shift file costs seconds, not a
 node-hour. It is one literal `mpiexec` line per stage; comment out what you do
 not want.
 
-To run steps 1–2 now and leave the rest for when the displacement arrives: set
-`start_step=1` in `config_steps15.conf` and comment out the three step-6 lines.
+### The two-pass ladder
+
+```
+PASS 1   steps15
+         step6  config_step6_bin2_nopos.conf   iter    0 -> 1024
+         step6  config_step6_bin1_nopos.conf   iter 1024 -> 1280
+STEP 7   step7  config_step6_bin1_nopos.conf   --iter 1280 --bin 1
+         -> correct_correct3D_extra.txt, next to the configs
+PASS 2   step6  config_step6_bin2.conf         iter    0 -> 1024   <- applies it
+         step6  config_step6_bin1.conf         iter 1024 -> 1280
+         step6  config_step6_bin0.conf         iter 1280 -> 1536
+```
+
+`_nopos` is pass 1's own set of configs, differing from pass 2's in exactly
+three keys: the third `rho` component — the position direction — is **0, so
+positions are frozen**; `correct3d_extra=0`; and `path_out` is
+`*_rec6_paper_nopos` rather than `*_rec6_paper`. Pass 1 therefore produces a
+volume whose drift has *not* been refined away, which is what step 7 needs in
+order to measure it; the two trees do not collide.
+
+Step 7's per-angle drift is only read at **bin 2** — the one rung with
+`start_iter=0`, where `Reader.read_pos` adds it to `cshifts_final`. bin 1 and
+bin 0 inherit it through the checkpoint; re-adding would double count.
+
+**Re-submitting a finished run silently loses work.** On a second submission
+`correct_correct3D_extra.txt` already exists, so pass 1 applies it; step 7 then
+re-measures from an already-corrected volume and **overwrites** the file with
+the residual. Step 6 *adds* the file rather than accumulating, so the original
+correction is lost, not doubled — worse than the first run, and nothing errors.
+`polaris_run.sh` refuses to start pass 1 when the file is present. After a
+mid-pass-2 preemption, moving the file aside is the **wrong** answer: comment
+out pass 1 and step 7 and resubmit pass 2 alone.
+
+**Resume is manual.** `find_latest_checkpoint` globs
+`checkpoint_*{start_iter:04}.h5` and returns `None` when `start_iter == 0`, so
+it finds the checkpoint you *name*, not the newest on disk. After a preemption:
+`ls {path_out}/checkpoints/`, set `start_iter` to the highest `checkpoint_NNNN`,
+comment out the finished `mpiexec` lines, resubmit. The same keying is what
+makes the deliberate bin2→bin1→bin0 handoff work, so it is not a bug to fix.
+
+### `preemptable` is the only queue these fit, and all seven can start at once
+
+A 2-node, 18 h job has nowhere else to go: `prod` has
+`resources_min.nodect = 10`, and its `small` route caps walltime at 3 h.
+`debug` is 2 nodes but 1 h. So a long wait behind a busy `preemptable` is
+contention, not a misconfiguration — there is no faster queue to move to.
+
+`preemptable`'s `max_run` is per **project** (`[p:PBS_GENERIC=10]`), with no
+per-user cap on us, so nodes freeing up can release all seven together rather
+than one at a time. Plan disk for the concurrent case.
+
+### Disk: budget ≈ 57 TB for all seven, not 43
+
+Two separate costs, and the checkpoint figure is only the second:
+
+| | per scan | seven |
+|---|---|---|
+| steps 1–2 HDF5 | **2.1 TB** (FT) / **2.8 TB** (HT) | ≈ 14 TB (six convert) |
+| step-6 checkpoints, if a run reaches bin 0 | ≈ 6.1 TB | ≈ 43 TB |
+
+Measured on disk, not estimated. The h5 is large because step 1 writes
+`/exchange/data{k}` as uint16 and step 2 **appends `/exchange/pdata{k}` as
+float32 to the same file**, so it roughly triples. Only HT_RD300 skips this
+(`start_step=3`); its h5 already holds `cshifts_final`, `shrink` and
+`pref_0/1/2`.
+
+Against ~94 TB free that leaves a ~37 TB margin. Checkpoints are never pruned,
+and a bin-0 one is 550 GB, so the margin goes quickly once a run gets that far.
 
 ## Files
 
 | file | what |
 |---|---|
-| [`esrf_layout.py`](esrf_layout.py) | filenames + geometry; **the `edfinfo` flavour is what reads this scan** |
+| [`esrf_layout.py`](esrf_layout.py) | filenames + geometry; this scan resolves as **`ewoks`** — geometry from the NXtomo, frames from the EDFs, because the virtual sources do not resolve |
 | [`config_steps15.conf`](config_steps15.conf) | steps 1–5 |
-| [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder |
-| [`polaris_run.sh`](polaris_run.sh) | PBS job, one `mpiexec` line per stage |
-| [`show_geometry.py`](show_geometry.py) | derived geometry and the per-level config blocks |
-| [`scan_overview.py`](scan_overview.py) | overview figure |
-| [`estimate_center.py`](estimate_center.py) | rotation centre from opposed projections |
-| [`estimate_motion.py`](estimate_motion.py) | drift from the post-scan retakes |
-| [`estimate_shrink.py`](estimate_shrink.py) | shrinkage from the post-scan retakes |
-| [`estimate_correct3d.py`](estimate_correct3d.py) | fits a `correct_correct3D.txt` from the refined positions |
-| [`step5_center_sweep.py`](step5_center_sweep.py) | centre refinement from the FBP volume |
-| [`show_iter.py`](show_iter.py) | one step-6 checkpoint: slices, probe, positions, convergence |
-| [`show_pos_errors.py`](show_pos_errors.py) | total position correction across the ladder |
-| [`diagnose_positions.py`](diagnose_positions.py) | splits it into runout, drift and displacement-stage error |
+| [`config_step6_bin{2,1,0}.conf`](config_step6_bin2.conf) | the BH ladder, pass 2 |
+| [`config_step6_bin{2,1}_nopos.conf`](config_step6_bin2_nopos.conf) | the same, pass 1: positions frozen, `correct3d_extra=0`, own `path_out` |
+| [`polaris_run.sh`](polaris_run.sh) | PBS job, one literal `mpiexec` line per stage |
+| [`preflight.py`](preflight.py) | runs first in the job; fails it on a half-copied scan. Reads **no frames** — see `check_frames_nonzero.py` |
 | [`steps15.py`](steps15.py) | steps 1–5 driver |
 | [`step6.py`](step6.py) | BH reconstruction driver |
+| [`step7.py`](step7.py) | per-angle drift from a finished volume → `correct_correct3D_extra.txt` |
+| [`estimate_rhapp.py`](estimate_rhapp.py) | the rhapp offset, per plane (validated: corr 0.875–0.998 vs `rhapp.mat`) |
+| [`estimate_center.py`](estimate_center.py) | rotation centre from opposed projections |
+| [`estimate_axis_paganin.py`](estimate_axis_paganin.py) | the step-4b axis, measured on bin-0 Paganin phase |
+| [`estimate_quali_motion.py`](estimate_quali_motion.py) | retake drift estimator — **does not work, `motion_src=none`**; see the section above |
+| [`check_frames_nonzero.py`](check_frames_nonzero.py) | one read per plane across all seven scans: are the frames actually non-zero? |
+| `sweep_{highpass,whiten,destripe,tiles,selftest}.py` | the five one-off diagnostics that closed the retake estimator; kept as the record, not run by anything |

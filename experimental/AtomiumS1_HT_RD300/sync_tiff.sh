@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pull the light step-6 output of AtomiumS1 from Polaris down to /data3.
+# Pull the light step-6 output of AtomiumS1_HT_RD300 from Polaris down to /data3.
 #
 #     ./sync_tiff.sh                 # one shot
 #     ./sync_tiff.sh --watch         # re-sync every 5 min until Ctrl-C
@@ -10,7 +10,14 @@
 #
 # What it copies by default (a couple of GB for the whole ladder):
 #     checkpoints_tiff/   the two preview slices per checkpoint
+#     slices/             vertical slices
 #     pos_errors/  shrink/  conv*.csv    the per-iteration diagnostics
+#
+# SRC and DST are env vars, so the same script pulls a variant run -- an
+# energy sweep, say, where each arm has its own _rec6_<tag> tree:
+#     for E in 17p000 17p100 17p200; do
+#         SRC=${SRC_BASE}_rec6_E$E DST=${DST}/E$E ./sync_tiff.sh
+#     done
 # What it never copies unless you ask: checkpoints/*.h5, the full obj volume.
 #
 # WHERE TO RUN IT: /data3 is an NFS mount from tomodata3-ib and is NOT mounted
@@ -24,8 +31,8 @@
 set -u
 
 REMOTE=${REMOTE:-polaris}
-SRC=${SRC:-/eagle/APS_IRI/vnikitin/20260829/AtomiumS1/Atomium_S1_HT_4K_RD300_004p5nm_0004_rec6}
-DST=${DST:-/data3/vnikitin/ESRF/AtomiumS1_HT}
+SRC=${SRC:-/eagle/APS_IRI/vnikitin/20260829/AtomiumS1/Atomium_S1_HT_4K_RD300_004p5nm_0004_rec6_paper}
+DST=${DST:-/data3/vnikitin/ESRF/AtomiumS1/Atomium_S1_HT_4K_RD300_004p5nm_0004_rec6_paper}
 DATA3_HOST=${DATA3_HOST:-tomo5}
 
 WATCH=0; INTERVAL=300; DRY=(); WITH_H5=0
@@ -71,6 +78,7 @@ if ! $SSH -O check "$REMOTE" >/dev/null 2>&1; then
 fi
 
 FILTER=(--include='checkpoints_tiff/***'
+        --include='slices/***'
         --include='pos_errors/***'
         --include='shrink/***'
         --include='conv*.csv'

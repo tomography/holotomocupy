@@ -400,27 +400,37 @@ def parse_args_steps15(config_file):
     args.paganin   = cfg.float("paganin",   fallback=120.0)
     args.nchunk    = cfg.int  ("nchunk",    fallback=16)
     args.ref_dist  = cfg.int  ("ref_dist",  fallback=0)
-    # Binning of the detector grid rhapp.mat was measured on -- Peter's
-    # bin_factor.  0 (default) reads it out of the driver ht_<pfile>.m and
-    # falls back to 1, which is what holotomo_slave.m itself defaults to.
-    args.rhapp_bin = cfg.int  ("rhapp_bin", fallback=0)
-    # Binning of the detector grid correct_motion.txt's DRIFT was measured on.
-    # The file is (random displacement + drift) and the two halves can be in
-    # different units: ESRF passes the random displacement through in raw
-    # detector px, but measures the drift on the bin_factor grid its pipeline
-    # ran on.  Step 3 isolates the drift by subtracting the random
-    # displacement, so this scales only that term.  1 (default) = the file is
-    # already raw, i.e. every scan that predates this knob keeps its behaviour;
-    # 0 = read bin_factor out of the driver ht_<pfile>.m, like rhapp_bin.
-    args.correct_motion_bin = cfg.int("correct_motion_bin", fallback=1)
 
-    # Binning of the grid correct_correct3D.txt was fitted on.  Unlike
-    # correct_motion.txt this file has no raw-px half to protect -- ESRF fits it
-    # with nabu on the <pfile>_rec_.nx projections, so the whole file is in
-    # whatever px those are.  For AtomiumS1 they are 2048 wide against the
-    # scan's own 4096, i.e. 2x2 binned, so the file scales by 2.  1 (default)
-    # leaves every scan that predates this knob exactly as it was.
-    args.correct3d_bin = cfg.int("correct3d_bin", fallback=1)
+    def _src(key, allowed, fallback="esrf"):
+        v = cfg.str(key, fallback=fallback).strip().lower()
+        if v not in allowed:
+            raise SystemExit(f"{key}={v!r} in {config_file}: expected one of "
+                             + " / ".join(allowed))
+        return v
+
+    # Where the rotation axis comes from.  'config' (the default, and what
+    # every pre-existing experiment folder gets) keeps the historical
+    # behaviour: the number typed into rotation_center_shift below is added
+    # to the horizontal shift column at step 4, step 5 and step 6
+    # independently.  'measured' has step 3 estimate the axis from opposed
+    # (theta, theta+180) projection pairs and fold it into cshifts_final
+    # once, so the three consumers cannot disagree and the config stays at 0.
+    #
+    # The two are mutually exclusive by construction: with 'measured' the
+    # offset is already inside cshifts_final, so a non-zero
+    # rotation_center_shift would be counted a second time.  steps15 refuses
+    # that combination rather than quietly doubling the axis offset.
+    args.center_src = _src("center_src", ("config", "measured"),
+                           fallback="config")
+
+    # Where the sample drift comes from.  'none' (the default, and what the
+    # pipeline did before the retake estimator existed) carries no drift term
+    # in step 3 and leaves the whole of it to step 7, which fits it out of a
+    # finished volume.  'quali' has step 3 measure it from the post-scan
+    # retakes -- see estimate_quali_motion.py -- and step 7 then only refines
+    # what is left.  'quali' is only worth selecting on a scan where the
+    # estimator has been validated against quali.mat.
+    args.motion_src = _src("motion_src", ("none", "quali"), fallback="none")
 
     # Take rotation_center_shift from ESRF's own nabu configs instead of the
     # number typed below.  <pfile>_/naburec/*.conf records

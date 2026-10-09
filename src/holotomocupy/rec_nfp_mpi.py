@@ -43,9 +43,6 @@ class RecNFP:
         for key, value in vars(args).items():
             setattr(self, key, value)
 
-        # proj/obj arrays are complex64. A subclass wanting a real-valued
-        # vars['proj'] can flip this to 'float32' around alloc_arrays().
-
         self.shift_type = getattr(args, 'shift_type', 'cubic')
 
         # cascade: F0 ◦ F1 ◦ F2 ◦ F3
@@ -122,10 +119,12 @@ class RecNFP:
         self.cl_chunking = Chunking(nbytes, self.nchunk)
         self.cl_prop     = Propagation(self.n, self.nz, self.nchunk, 1, wavelength, voxelsize,
                                        np.array([distance]))
+        # nchunk builds the cuFFT plans up front.  The global plan cache is off
+        # (set_size(0) above), so without it ShiftFFT re-plans on every call.
         if self.shift_type == 'fft':
-            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj)
+            self.cl_shift = ShiftFFT(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
         elif self.shift_type == 'cubic':
-            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj)
+            self.cl_shift = Shift(self.n, self.nobj, self.nz, self.nzobj, self.nchunk)
         else:
             raise ValueError(f"shift_type must be 'cubic' or 'fft', got {self.shift_type!r}")
 
@@ -187,39 +186,12 @@ class RecNFP:
                 self.log_iter(vars, i, writer)
 
     def estimate_rho_coord(self, vars, grads, etas, niter_trial=16, max_extend=8):
-        """Coordinate search on rho[prb, pos] over a geometric grid
-        {..., init/2, init, 2*init, ...} centred on the current self.rho_sq.
+        """Coordinate search on rho[prb, pos], as Rec.estimate_rho_coord.
 
-        The 2-D counterpart of Rec.estimate_rho_coord.  rho here is
-        [proj, prb, pos] and `proj` is the reference scale, so it is left
-        alone exactly as `obj` is in the 3-D search; there is no `tp`.
-
-        For each searched variable in order (prb -> pos; a variable frozen at
-        rho = 0 is skipped, since the geometric grid can never leave zero):
-          - Run three short BH trials at rho = {init/2, init, 2*init}
-              (`init` = the current sqrt(rho_sq[v])).
-          - If the middle wins, keep it.
-          - Else extend up (x2, x4, ...) or down (/2, /4, ...) until improvement
-            stops, capped by max_extend rungs.
-          - Adopt the winning value; move on with the winner baked into `base`.
-
-        Each trial restores vars/grads/etas/table/start_iter to the snapshot
-        taken here, runs `_iterate` for niter_trial iterations silently, and
-        scores with self.min().  A trial that blows up (CUDA / RuntimeError, or
-        a non-finite error) scores inf so the search steps past divergent rho.
-
-        Every score comes out of self.min(), which allreduces, so all ranks see
-        the same numbers and walk the same branches -- the search needs no
-        collective of its own.
-
-        Trial errors are memoised on the full rho vector, so the centre probe
-        of the second coordinate -- the vector that just won the first -- is
-        free.
-
-        Updates self.rho_sq in place and restores the state so the outer BH
-        loop starts clean.  Costs one extra copy of vars (proj dominates) for
-        the snapshot, and 3..(3 + 2*max_extend) trials of niter_trial
-        iterations per coordinate, minus one for the second coordinate.
+        rho here is [proj, prb, pos] with no `tp`; `proj` is the reference
+        scale and is left alone, exactly as `obj` is in the 3-D search.
+        Scores come from self.min(), which allreduces, so every rank walks the
+        same branches and the search needs no collective of its own.
         """
         snap_vars       = {k: v.copy() for k, v in vars.items()}
         snap_table      = self.table.copy()
@@ -816,6 +788,9 @@ class RecNFP:
     # coeff(x32) is cached within a chunk; callers (gradients_cascade / hessian_cascade
     # closures) MUST invoke cl_shift.coeff_cache_reset() at chunk boundaries since
     # id(arr) values are reused once an earlier array is GC'd.
+    #
+    # m comes from cl_shift.unit_mag: NFP never magnifies, and the operator-owned
+    # buffer lets ShiftFFT skip the device sync its magnification test would cost.
 
     def _tiled_coeff(self, psi, n):
         """Cached coeff(psi) broadcast to [n, ...] for the per-theta shift kernels."""
@@ -825,7 +800,7 @@ class RecNFP:
         x31, x32, x33 = x
         n = len(x33)
         c = self._tiled_coeff(x32, n)
-        m = cp.ones((n, 2), dtype='float32')
+        m = self.cl_shift.unit_mag(n)
         return x31, self.cl_shift.curlySc(c, x33, m)
 
     def dF3(self, x, y, return_x=True):
@@ -834,7 +809,7 @@ class RecNFP:
         n  = len(x33)
         c  = self._tiled_coeff(x32, n)
         c1 = self._tiled_coeff(y32, n)
-        m = cp.ones((n, 2), dtype='float32')
+        m = self.cl_shift.unit_mag(n)
         y22 = self.cl_shift.dcurlySc(c, x33, m, c1, y33)
         if return_x:
             x22 = self.cl_shift.curlySc(c, x33, m)
@@ -850,7 +825,7 @@ class RecNFP:
         c  = self._tiled_coeff(x32, n)
         cy = self._tiled_coeff(y32, n)
         cz = self._tiled_coeff(z32, n)
-        m = cp.ones((n, 2), dtype='float32')
+        m = self.cl_shift.unit_mag(n)
         # Coefficients passed CROSSED: the fused kernel contracts each
         # coefficient with the shift in its own slot, so the mixed second
         # differential needs c_z against dr_y and c_y against dr_z. See the
@@ -868,7 +843,7 @@ class RecNFP:
         x31, x32, x33 = x
         n = len(x33)
         c = self._tiled_coeff(x32, n)
-        m = cp.ones((n, 2), dtype='float32')
+        m = self.cl_shift.unit_mag(n)
         Deltapsi, y33 = self.cl_shift.dcurlySadjc(c, x33, m, y22)
         y32 = cp.zeros([self.nzobj, self.nobj], dtype='complex64')
         y32[:] = cp.sum(Deltapsi, axis=0)

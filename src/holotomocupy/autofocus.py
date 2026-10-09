@@ -140,6 +140,13 @@ def cylinder_mask(n, nz):
     return cp.broadcast_to(cp.asarray(np.sqrt(yy**2 + xx**2) < n / 2), (nz, n, n))
 
 
+def z_split(nz, rank, size):
+    """[lo, hi) of the z slices this rank reconstructs; balanced, in order."""
+    q, r = divmod(nz, size)
+    lo = rank * q + min(rank, r)
+    return lo, lo + q + (rank < r)
+
+
 def project_chunked(cl, obj, nzc):
     """R of a volume taller than the Tomo buffer; obj stays on the host.
 
@@ -188,9 +195,16 @@ class Focus:
 
     `s_true` is optional and only ever used to RECORD how far off the search
     is; the optimiser never sees it.  On real data it is None.
+
+    With `comm`, the z slices are split over the ranks.  Every rank holds the
+    whole sinogram and applies the whole shift -- a vertical shift mixes z, so
+    that part cannot be split -- and reconstructs only its own slices.
+    Histograms add, so one 256-bin allreduce per evaluation is the only
+    traffic.  `comm=None` is the old single-GPU path, unchanged.
     """
 
-    def __init__(self, cl, sh, d, theta, sel, lo, hi, nzc=0, s_true=None):
+    def __init__(self, cl, sh, d, theta, sel, lo, hi, nzc=0, s_true=None,
+                 comm=None):
         self.cl, self.sh, self.d = cl, sh, d
         self.theta, self.sel, self.lo, self.hi = theta, sel, lo, hi
         self.G = gauge_curves(theta)
@@ -198,6 +212,17 @@ class Focus:
         self.nz = d.shape[1]
         self.nzc = min(nzc or self.nz, self.nz)
         self.zmid = self.nz // 2
+        self.comm = comm
+        size = 1 if comm is None else comm.size
+        self.zlo, self.zhi = z_split(self.nz, 0 if comm is None else comm.rank,
+                                     size)
+        # who owns the slice the summary picture is made of
+        self.zowner = next(k for k in range(size)
+                           if z_split(self.nz, k, size)[0] <= self.zmid
+                           < z_split(self.nz, k, size)[1])
+        if comm is not None:
+            from mpi4py import MPI
+            self._inplace, self._sum = MPI.IN_PLACE, MPI.SUM
         self.P, self.V = None, None             # set per rung by fit_drift
         self.degmax, self.stage = 0, 0
         self.trace = []                 # (entropy, identifiable error, c.ravel())
@@ -211,17 +236,28 @@ class Focus:
         """Undo the drift s, reconstruct, score.  One evaluation, in chunks.
 
         The shift is applied to the whole sinogram because a vertical shift
-        mixes z; the FBP and the histogram then go nzc slices at a time.
+        mixes z; the FBP and the histogram then go nzc slices at a time, over
+        this rank's z range only.
         """
         p = self.sh(self.d, -np.asarray(s, dtype='float32'))
         h, mid = cp.zeros(NBINS, 'float64'), None
-        for z0 in range(0, self.nz, self.nzc):
-            u = self.cl.fbp(p[:, z0:z0 + self.nzc], 'ramp')
+        for z0 in range(self.zlo, self.zhi, self.nzc):
+            z1 = min(z0 + self.nzc, self.zhi)
+            u = self.cl.fbp(p[:, z0:z1], 'ramp')
             h += hist_of(u, self.sel[:u.shape[0]], self.lo, self.hi)
-            if want_mid and z0 <= self.zmid < z0 + u.shape[0]:
+            if want_mid and z0 <= self.zmid < z1:
                 mid = cp.asnumpy(u[self.zmid - z0])
             del u
         del p
+        if self.comm is not None:
+            # allreduce and not reduce: every rank runs its own copy of
+            # Nelder-Mead, so they must all see the same number or they walk
+            # different paths and stop at different times
+            hh = cp.asnumpy(h)
+            self.comm.Allreduce(self._inplace, hh, op=self._sum)
+            h = cp.asarray(hh)
+            if want_mid:
+                mid = self.comm.bcast(mid, root=self.zowner)
         return entropy_of_hist(h), mid
 
     def err(self, s):

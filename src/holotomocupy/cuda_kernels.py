@@ -98,10 +98,26 @@ extern "C" __global__ void gather(float2* g, float2* f, float* theta, int m, flo
     // from the middle just scales by 2.
     //
     // Current minus wanted is a per-angle detector shift
-    //     d(theta) = (cos - sin)/2 - 1/2        (0 at theta=0, -1 at 90 deg)
+    //     d(theta) = (cos - sin)/2 - (n/ndet)/2    (0 at theta=0 and ndet==n)
     // and undoing it is one phase on the gathered sample.  dir==1 applies the
     // conjugate before scattering, so R and RT stay an exact adjoint pair.
-    const float d_ax = 0.5f * (__cosf(theta[ty]) - __sinf(theta[ty])) - 0.5f;
+    //
+    // MIND THE UNITS.  This phase is exp(-2i*pi*fr*d_ax) with fr in cycles per
+    // OBJECT pixel, so d_ax is in object pixels.  The first term is half an
+    // object pixel (the object axis, n/2 -> (n-1)/2) projected on the detector.
+    // The second is half a DETECTOR pixel (the detector origin, ndet/2 ->
+    // (ndet-1)/2), and a detector pixel is n/ndet object pixels -- hence the
+    // n/ndet.  The two coincide at ndet == n, which is why a flat 0.5f was
+    // correct everywhere the default sampling was used and wrong only on the
+    // tomo_upsample=2 path, where it over-shifted by half a detector pixel.
+    // Symptom: the sinogram of an even object came out with its centroid at
+    // -0.38 to -0.43 detector pixels instead of 0, i.e. a centre-of-rotation
+    // error of ~0.2 object pixels on every upsampled reconstruction.  Measured
+    // after this fix, |g(s) - g(-s)|max / |g|max for a disc drops from 1.1e-01
+    // to 1.1e-04 at n=32, 1.8e-01 to 6.9e-05 at n=48, 1.1e-01 to 5.2e-05 at
+    // n=64, while ndet == n is unchanged to the last bit at all three.
+    const float d_ax = 0.5f * (__cosf(theta[ty]) - __sinf(theta[ty]))
+                     - 0.5f * (float)n / (float)ndet;
     float sn_ax, cs_ax;
     __sincosf(-6.283185307179586f * fr * d_ax, &sn_ax, &cs_ax);
 

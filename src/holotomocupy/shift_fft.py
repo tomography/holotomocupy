@@ -203,6 +203,8 @@ class ShiftFFT():
         self.j_sq_xb  = ((cp.arange(n  + npsi  - 1, dtype='float32') - n  // 2) ** 2).astype('float32')
         self.j_sq_yb  = ((cp.arange(nz + nzpsi - 1, dtype='float32') - nz // 2) ** 2).astype('float32')
 
+        self._unit_mag = {}          # ntheta -> owned ones((ntheta, 2))
+
         # Match Shift's coeff cache surface so this class is drop-in.
         self.coeff_cache  = {}
         self.coeff_hits   = 0
@@ -238,12 +240,29 @@ class ShiftFFT():
             p5 *= 5
         return best
 
-    @staticmethod
-    def _is_unit_mag(m):
+    def unit_mag(self, ntheta):
+        """Cached ones((ntheta, 2)) for callers that never magnify.
+
+        This object owns the buffer for the operator's lifetime, so it is never
+        freed and `m is` cannot alias a later array -- which is what makes the
+        identity fast path in _is_unit_mag sound.
+        """
+        m = self._unit_mag.get(ntheta)
+        if m is None:
+            m = cp.ones((ntheta, 2), dtype='float32')
+            self._unit_mag[ntheta] = m
+        return m
+
+    def _is_unit_mag(self, m):
         """All entries of m equal to 1 → fast (FFT-shift) path; else chirp-z.
 
         m is shape (ntheta, 2) — axis 1 is (my, mx).
+
+        The device comparison below syncs, and it sits at the top of every
+        S/Sadj/dcurlySc call, so a buffer from unit_mag() short-circuits it.
         """
+        if m is self._unit_mag.get(m.shape[0]):
+            return True
         m_arr = cp.asarray(m)
         # Tolerant comparison so float32 1.0 hits the fast path even if the
         # caller built m as numpy float64.

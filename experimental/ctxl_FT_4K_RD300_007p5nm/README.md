@@ -120,7 +120,7 @@ files** under `RAW_DATA/`.  When a virtual NXtomo is present the flavour is
 
 | added | why |
 |---|---|
-| `NxFrames` | rebases the 124 virtual sources onto our tree; `../AtomiumS1/nx_frames.py` is a standalone copy |
+| `NxFrames` | rebases the 124 virtual sources onto our tree; `../AtomiumS1_FT_RD300/nx_frames.py` is a standalone copy |
 | `_nx_is_virtual` | picks `nxvds` vs `ewoks`; False on an unreadable `.nx`, so a half-copied drop degrades to EDF |
 | `frame_shape(k)` | `steps15.py:175`, without reading a frame |
 | `read_proj` / `read_refs` / `read_darks` | `steps15.py:297-317`; VDS for `nxvds`, fabio otherwise |
@@ -656,7 +656,7 @@ its horizontal column is identically zero, so all of the x correction here is
 the random displacement.
 
 **ESRF supplied nothing for this scan.** Unlike the `ctxl_HT` sibling and
-`../AtomiumS1`, eagle held no `<pfile>_0003_` octave directory at all: no driver
+`../AtomiumS1_FT_RD300`, eagle held no `<pfile>_0003_` octave directory at all: no driver
 `ht_<pfile>.m`, no `<pfile>_rec_.info`, no `rhapp.mat`, no
 `correct_correct3D.txt`, and no `naburec/` — so no Peter shifts to install and
 no ESRF rotation axis to read out. `rhapp.mat` missing is expected anyway — one

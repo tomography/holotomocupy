@@ -238,3 +238,4 @@ demo/demo_out/
 demo/data/
 *.tif
 
+tmp/

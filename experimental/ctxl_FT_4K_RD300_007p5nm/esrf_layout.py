@@ -192,7 +192,7 @@ def _nx_is_virtual(nx_path):
 # (recorded path first, then the same tail against every ancestor of the .nx,
 # nearest first) and reads the sources directly.  `missing` lists whatever
 # still could not be found; callers must REFUSE TO START rather than read
-# zeros.  ../AtomiumS1/nx_frames.py is a standalone copy of this class.
+# zeros.  ../AtomiumS1_FT_RD300/nx_frames.py is a standalone copy of this class.
 # ---------------------------------------------------------------------------
 
 # Source files kept open at once.  An NFP companion has two (darks + frames);

@@ -55,6 +55,7 @@ class Shift():
         self._coeff_cache  = {}
         self._coeff_hits   = 0
         self._coeff_misses = 0
+        self._unit_mag     = {}      # ntheta -> owned ones((ntheta, 2))
 
         self._sk       = s_kernel
         self._dsk      = ds_kernel
@@ -137,6 +138,19 @@ class Shift():
             self._coeff_hits = 0
             self._coeff_misses = 0
         return stats
+
+    def unit_mag(self, ntheta):
+        """Cached ones((ntheta, 2)) for callers that never magnify.
+
+        Same API as ShiftFFT.unit_mag, so a caller can build m without knowing
+        which operator it has.  Here it only saves the per-call allocation;
+        this class has no magnification branch to short-circuit.
+        """
+        m = self._unit_mag.get(ntheta)
+        if m is None:
+            m = cp.ones((ntheta, 2), dtype='float32')
+            self._unit_mag[ntheta] = m
+        return m
 
     # ------------------------------------------------------------------
     # Forward / adjoint shift  S / S*
