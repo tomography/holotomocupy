@@ -50,3 +50,23 @@ credits
 | `demo/` | the whole chain on synthetic data, 1 or N GPUs |
 | `experimental/<dataset>/` | one folder per beamtime: configs + `step0/steps15/step6/step7` |
 | `tests/` | 17 folders, scripts not pytest; start at `tests/unit` |
+
+## Citation
+
+If you use this software, please cite:
+
+> Viktor Nikitin et al., "Scalable joint X-ray nano-holotomography
+> reconstruction with the bilinear Hessian method", *Optica* **13**(9),
+> 1814–1826 (2026). <https://doi.org/10.1364/OPTICA.603920>
+
+The BibTeX entry is on the [credits](credits) page.
+
+## License
+
+3-clause BSD, with the UChicago Argonne / U.S. Department of Energy
+government-rights notice. Copyright (c) 2024-2026, UChicago Argonne, LLC;
+produced under U.S. Government contract DE-AC02-06CH11357 for Argonne
+National Laboratory. The software is provided "as is", without warranty of
+any kind. See [credits](credits) for the summary and
+[`LICENSE`](https://github.com/tomography/holotomocupy/blob/master/LICENSE)
+for the full text.
