@@ -29,7 +29,7 @@ across several step sizes. Residuals flatten once they reach float32 rounding,
 and points at that floor are dropped from the fit rather than dragging the
 slope down.
 
-## Everything else
+## The other test folders
 
 | folder | what it checks | needs |
 |---|---|---|

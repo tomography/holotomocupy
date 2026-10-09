@@ -26,7 +26,7 @@ pip install -e .
 the pip-only list, but you still have to supply MPI and a parallel h5py
 yourself.
 
-## Check it
+## Verify the install
 
 ```bash
 tests/unit/run.sh

@@ -22,7 +22,7 @@ cd demo
 The notebooks and the scripts build the same data — both import
 `phantoms.py` — so a notebook is the readable version of the script beside it.
 
-## Measured
+## What the demo should produce
 
 | run | GPU | `shift_type` | result |
 |---|---|---|---|
@@ -34,7 +34,7 @@ The `pos abs error` logged during the solve is measured from the *starting
 guess*, so it grows as the refinement works. The line printed at the end is
 the distance to the truth, which is the one to read.
 
-## `shift_type`
+## Choosing `shift_type`: cubic or fft
 
 Two interpolants implement the same operator interface:
 
