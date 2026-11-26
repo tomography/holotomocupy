@@ -14,7 +14,7 @@ from .shift import Shift
 from .shift_fft import ShiftFFT
 from .chunking import Chunking, _axpby
 from .extra_terms import LaplacianTerm, PrbfitTerm
-from .utils import make_pinned, mshow_approx, redot, reprod, timer
+from .utils import make_pinned, mshow_approx, redot, reprod, timer, log_params
 from .psf import psf_taps as _psf_taps, psf_blur as _psf_blur
 from .mpi_functions import MPIClass
 from .logger_config import logger
@@ -140,6 +140,11 @@ class Rec:
         norm_magnifications = magnifications / magnifications[0]
         distance = (self.z1 * z2) / self.focustodetectordistance * norm_magnifications**2
         voxelsize = self.detector_pixelsize / magnifications[0]
+        derived = dict(
+            wavelength=wavelength, z2=z2, magnifications=magnifications,
+            norm_magnifications=norm_magnifications, distance=distance,
+            voxelsize=voxelsize,
+            fresnel_number=voxelsize**2 / (wavelength * distance))
 
         # Variable scalings. args.rho are the initial values, used as-is unless
         # args.estimate_rho asks for a coordinate search first (estimate_rho_coord).
@@ -244,6 +249,18 @@ class Rec:
         self._apply_F_misses = 0
         # read-only zero slabs for the d2F_dF3 fallback branches, keyed by shape
         self._zero_buf_cache = {}
+
+        if self.rank == 0:
+            derived.update(
+                mpi_ranks=self.cl_mpi.size, local_ntheta=self.local_ntheta,
+                local_nzobj=self.local_nzobj, ndistchunk=self.ndistchunk,
+                gpu_batch=self.gpu_batch,
+                shift_type=self.shift_type, model=self.model,
+                psf_sigma=self.psf_sigma, rho_sq=self.rho_sq,
+                estimate_rho=self.estimate_rho,
+                rho_estimate_niter=self.rho_estimate_niter,
+                norm_const=self.norm_const)
+            log_params("Rec parameters", vars(args), derived)
 
     def _dist_bytes(self):
         """Per-distance chunking-pool cost inside a hoisted cascade kernel:

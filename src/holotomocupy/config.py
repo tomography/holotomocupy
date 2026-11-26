@@ -362,6 +362,9 @@ def parse_args_step0_nx(config_file):
     # iterations inside each trial, the only way to tell a slow descent from a
     # first-step blow-up.
     args.rho_trial_error_step = cfg.int("rho_trial_error_step", fallback=-1)
+    args.inspect_data    = cfg.bool ("inspect_data",    fallback=True)
+    args.data_outlier_k  = cfg.float("data_outlier_k",  fallback=5.0)
+    args.data_pixel_k    = cfg.float("data_pixel_k",    fallback=8.0)
     args.log_level       = cfg.str("log_level", fallback="INFO")
 
     # Detector PSF: one Gaussian on the detector intensity, sigma in detector

@@ -13,7 +13,7 @@ from .shift import Shift
 from .shift_fft import ShiftFFT
 from .chunking import Chunking
 from .utils import (make_pinned, mshow, mshow_polar, mshow_pos, redot,
-                    reprod, timer, write_tiff)
+                    reprod, timer, write_tiff, log_params)
 from .mpi_functions import MPIClass
 from .psf import psf_taps, psf_blur
 from .logger_config import logger
@@ -74,6 +74,10 @@ class RecNFP:
         magnification = self.focustodetectordistance / z1
         distance      = z1 * z2 / self.focustodetectordistance
         voxelsize     = self.detector_pixelsize / magnification
+        derived = dict(
+            wavelength=wavelength, z2=z2, magnification=magnification,
+            distance=distance, voxelsize=voxelsize,
+            fresnel_number=voxelsize**2 / (wavelength * distance))
 
         self.rho_sq = {
             'proj': args.rho[0]**2,
@@ -143,6 +147,16 @@ class RecNFP:
         self.allreduce2   = self.cl_mpi.allreduce2
         self.allreduce_scalars = self.cl_mpi.allreduce_scalars
 
+        if self.rank == 0:
+            derived.update(
+                mpi_ranks=self.cl_mpi.size, local_ntheta=self.local_ntheta,
+                gpu_batch=self.gpu_batch, shift_type=self.shift_type,
+                model=self.model, psf_sigma=self.psf_sigma,
+                rho_sq=self.rho_sq, estimate_rho=self.estimate_rho,
+                rho_estimate_niter=self.rho_estimate_niter,
+                rho_trial_error_step=self.rho_trial_error_step)
+            log_params("RecNFP parameters", vars(args), derived)
+
     def alloc_arrays(self):
         self.vars = {
             'prb':  cp.empty([self.nz, self.n],       dtype='complex64'),
@@ -161,6 +175,9 @@ class RecNFP:
         grads = self.grads
         etas  = self.etas
 
+        if getattr(self, 'inspect_data', True):
+            self.inspect_data()
+
         self.precalc(vars)
         self.error_debug(vars, -1)
 
@@ -170,6 +187,103 @@ class RecNFP:
 
         self._iterate(vars, grads, etas, writer)
         return vars
+
+    def inspect_data(self):
+        """Log a data-quality report; returns the flags on rank 0, None elsewhere."""
+        from mpi4py import MPI
+        import cupyx.scipy.ndimage as ndi
+
+        k_out = getattr(self, 'data_outlier_k', 5.0)
+        k_pix = getattr(self, 'data_pixel_k', 8.0)
+        nloc = self.local_ntheta
+        npix = self.nz * self.n
+        st = np.zeros([nloc, 6], dtype='float64')
+        sum_img = cp.zeros([self.nz, self.n], dtype='float64')
+        cnt_img = cp.zeros([self.nz, self.n], dtype='float64')
+        step = max(1, self.nchunk)
+        for k in range(0, nloc, step):
+            d = cp.asarray(self.data[k:k + step])
+            fin = cp.isfinite(d)
+            cnt = cp.maximum(fin.sum(axis=(1, 2)), 1)
+            d0 = cp.where(fin, d, 0).astype('float64')
+            mean = d0.sum(axis=(1, 2)) / cnt
+            var = (cp.where(fin, d0 - mean[:, None, None], 0)**2).sum(axis=(1, 2)) / cnt
+            st[k:k + step, 0] = mean.get()
+            st[k:k + step, 1] = cp.sqrt(var).get()
+            st[k:k + step, 2] = cp.where(fin, d, cp.inf).min(axis=(1, 2)).get()
+            st[k:k + step, 3] = cp.where(fin, d, -cp.inf).max(axis=(1, 2)).get()
+            st[k:k + step, 4] = (npix - fin.sum(axis=(1, 2))).get()
+            st[k:k + step, 5] = (fin & (d <= 0)).sum(axis=(1, 2)).get()
+            sum_img += d0.sum(axis=0)
+            cnt_img += fin.sum(axis=0)
+            del d, fin, d0
+
+        comm = self.cl_mpi.comm
+        all_st = comm.gather(st, root=0)
+        sum_np = np.stack([sum_img.get(), cnt_img.get()])
+        tot_img = np.zeros_like(sum_np) if self.rank == 0 else None
+        comm.Reduce(sum_np, tot_img, op=MPI.SUM, root=0)
+        del sum_img, cnt_img
+        if self.rank != 0:
+            return None
+
+        st = np.concatenate(all_st, axis=0)
+        mean, std, dmin, dmax, nonfin, nonpos = st.T
+        contrast = std / np.where(mean != 0, mean, np.nan)
+        idx = np.arange(len(st))
+
+        def _robust_z(x):
+            med = np.nanmedian(x)
+            mad = 1.4826 * np.nanmedian(np.abs(x - med))
+            return np.abs(x - med) / mad if mad > 0 else np.zeros_like(x)
+
+        def _ids(mask, cap=20):
+            ii = idx[mask]
+            s = ", ".join(map(str, ii[:cap]))
+            return s + (f", ... (+{len(ii) - cap})" if len(ii) > cap else "")
+
+        bad_frame = (_robust_z(mean) > k_out) | (_robust_z(contrast) > k_out)
+
+        mimg = cp.asarray(tot_img[0] / np.maximum(tot_img[1], 1), dtype='float32')
+        resid = mimg - ndi.median_filter(mimg, size=5)
+        z = (resid - cp.median(resid)) / (1.4826 * cp.median(cp.abs(resid - cp.median(resid))) + 1e-30)
+        hot = (z > k_pix).get()
+        dead = (z < -k_pix).get()
+
+        lines = [
+            f"data quality ({len(st)} frames, {self.nz}x{self.n} px):",
+            f"  mean      : {np.nanmean(mean):.4g}  (frames {np.nanmin(mean):.4g} .. "
+            f"{np.nanmax(mean):.4g}, rel. spread {np.nanstd(mean) / np.nanmean(mean):.2%})",
+            f"  contrast  : median {np.nanmedian(contrast):.4g}  "
+            f"(frames {np.nanmin(contrast):.4g} .. {np.nanmax(contrast):.4g})",
+            f"  range     : {np.nanmin(dmin):.4g} .. {np.nanmax(dmax):.4g}",
+            f"  hot/dead  : {int(hot.sum())} / {int(dead.sum())} px "
+            f"(> {k_pix:g} sigma vs 5x5 median of the mean image)",
+            f"  outliers  : {int(bad_frame.sum())} frame(s) (> {k_out:g} robust sigma)",
+        ]
+        logger.info("\n".join(lines))
+
+        gmean = float(np.nanmean(mean))
+        not_normalized = not (0.5 < gmean < 2.0)
+        if not_normalized:
+            logger.warning(f"data: mean {gmean:.4g} is not ~1, data not normalized?")
+        if nonfin.sum() > 0:
+            logger.error(f"data: {int(nonfin.sum())} NaN/Inf pixels in "
+                         f"{int((nonfin > 0).sum())} frame(s): {_ids(nonfin > 0)} "
+                         f"-- err will be NaN")
+        if nonpos.sum() > 0:
+            logger.warning(f"data: {int(nonpos.sum())} pixels <= 0 in "
+                           f"{int((nonpos > 0).sum())} frame(s): {_ids(nonpos > 0)}")
+        if bad_frame.any():
+            logger.warning(f"data: outlier frames (theta index): {_ids(bad_frame)}")
+        if hot.any() or dead.any():
+            yx = np.argwhere(hot | dead)[:10]
+            logger.warning(f"data: hot/dead pixels (y, x), first {len(yx)}: "
+                           f"{', '.join(f'({y},{x})' for y, x in yx)}")
+
+        return dict(nonfinite_frames=idx[nonfin > 0], nonpos_frames=idx[nonpos > 0],
+                    outlier_frames=idx[bad_frame], hot_pixels=np.argwhere(hot),
+                    dead_pixels=np.argwhere(dead), not_normalized=not_normalized)
 
     def _iterate(self, vars, grads, etas, writer=None):
         """Main BH iteration loop. Assumes precalc() has already run."""

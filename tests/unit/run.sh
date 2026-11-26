@@ -21,7 +21,7 @@ done
 
 want="${1:-}"
 rc=0
-for f in test_env.py test_operators.py test_derivatives.py test_shift_derivatives.py test_cascade.py; do
+for f in test_env.py test_operators.py test_derivatives.py test_shift_derivatives.py test_cascade.py test_inspect_data.py; do
     case "$f" in *"${want}"*) ;; *) [ -n "$want" ] && continue ;; esac
     echo; echo "================ $f"
     "${PY}" "${here}/$f" || rc=1
