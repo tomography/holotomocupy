@@ -156,3 +156,32 @@ def empty_like(x):
         return cp.empty_like(x)
     return np.empty_like(x)
 
+
+def _fmt_param(v, max_items=8):
+    if isinstance(v, cp.ndarray):
+        v = v.get() if v.size <= max_items else v
+    if isinstance(v, (np.ndarray, cp.ndarray)):
+        if v.size <= max_items:
+            return np.array2string(np.asarray(v), separator=', ',
+                                   formatter={'float_kind': lambda x: f"{x:.6g}"})
+        return f"array{tuple(v.shape)} {v.dtype}"
+    if isinstance(v, (list, tuple)) and len(v) > max_items:
+        return f"{type(v).__name__}[{len(v)}]"
+    if isinstance(v, (float, np.floating)):
+        return f"{v:.6g}"
+    s = repr(v)
+    return s if len(s) <= 120 else s[:117] + "..."
+
+
+def log_params(title, params, derived=None, skip=("comm",)):
+    """Log params (sorted) and derived values as one block; call on rank 0."""
+    width = max([len(k) for k in params] + [len(k) for k in (derived or {})] + [1])
+    lines = [f"{title}:"]
+    for k in sorted(params):
+        if k not in skip:
+            lines.append(f"  {k:<{width}} = {_fmt_param(params[k])}")
+    if derived:
+        lines.append("derived:")
+        for k, v in derived.items():
+            lines.append(f"  {k:<{width}} = {_fmt_param(v)}")
+    logger.info("\n".join(lines))
